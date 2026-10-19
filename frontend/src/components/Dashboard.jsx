@@ -9,6 +9,7 @@ import MeetingRecords from "./MeetingRecords";
 import ReceiptsAndAudit from "./ReceiptsAndAudit";
 import ConstitutionManagement from "./ConstitutionManagement";
 import MemberPassbook from "./MemberPassbook";
+import CycleManagement from "./CycleManagement";
 
 export default function Dashboard({ user, onLogout }) {
   const [groupDashboard, setGroupDashboard] = useState(null);
@@ -20,6 +21,22 @@ export default function Dashboard({ user, onLogout }) {
   const [meetingRefreshKey, setMeetingRefreshKey] = useState(0);
   const groupId = Number(user?.groupId ?? user?.group_id);
   const activeCycleId = activeCycle?.id ?? null;
+  const isLeadership = ["TREASURER", "SECRETARY", "CHAIRPERSON", "ADMIN"].includes(String(user?.role || "").toUpperCase());
+
+  const handleCycleChanged = async (nextCycle) => {
+    if (!nextCycle?.id) return;
+    setActiveCycle(nextCycle);
+    try {
+      const [groupRes, memberRes] = await Promise.all([
+        API.get(`/groups/${groupId}/cycles/${nextCycle.id}/dashboard`),
+        API.get(`/groups/${groupId}/cycles/${nextCycle.id}/members/${user.id}/dashboard`),
+      ]);
+      if (groupRes.data.success) setGroupDashboard(groupRes.data.dashboard);
+      if (memberRes.data.success) setMemberDashboard(memberRes.data.dashboard);
+    } catch {
+      // The cycle component reports the successfully created cycle; metrics can refresh on next visit.
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -196,6 +213,18 @@ export default function Dashboard({ user, onLogout }) {
                 Cashbook &amp; Reconciliation
               </button>
             )}
+            {isLeadership && (
+              <button
+                onClick={() => setActiveTab("cycle-management")}
+                className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition ${
+                  activeTab === "cycle-management"
+                    ? "bg-slate-300/60 text-slate-900 font-semibold shadow-2xs"
+                    : "text-slate-600 hover:bg-slate-200/50"
+                }`}
+              >
+                Cycle Closing &amp; New Cycle
+              </button>
+            )}
           </nav>
         </div>
 
@@ -238,13 +267,21 @@ export default function Dashboard({ user, onLogout }) {
                         ? "Meeting Records & Receipts"
                         : activeTab === "constitution"
                           ? "Constitution & Rules"
-                          : "Leadership Operations"}
+                          : activeTab === "cycle-management"
+                            ? "Cycle Closing & New Cycle"
+                            : "Leadership Operations"}
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
               Cycle {activeCycle?.cycle_number ?? "Unavailable"} Financial Summary & Operations
             </p>
           </div>
         </header>
+
+        {activeCycle?.status === "CLOSING" && (
+          <div className="mx-8 mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+            <strong>Cycle {activeCycle.cycle_number} is in share-out closing.</strong> New financial entries are locked. Open <button type="button" onClick={() => setActiveTab("cycle-management")} className="font-bold underline underline-offset-2">Cycle Closing &amp; New Cycle</button> to record member payouts and finish the witnessed final cash count.
+          </div>
+        )}
 
         {/* Content Container */}
         <main className="p-8 max-w-7xl space-y-8">
@@ -466,6 +503,8 @@ export default function Dashboard({ user, onLogout }) {
             <ConstitutionManagement user={user} />
           ) : activeTab === "cashbook" ? (
             <CashbookOperations user={user} activeCycleId={activeCycleId} />
+          ) : activeTab === "cycle-management" && isLeadership ? (
+            <CycleManagement user={user} activeCycle={activeCycle} onCycleChanged={handleCycleChanged} />
           ) : (
             /* Leadership Terminal Tab: recording and administration actions */
             <div className="space-y-8">

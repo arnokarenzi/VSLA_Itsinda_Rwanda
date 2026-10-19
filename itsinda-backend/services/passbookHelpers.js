@@ -17,6 +17,7 @@ function activityForEntry(entryType, transactionType = null) {
   if (type === "GUSIBUZA_FEE" || txType === "GUSIBUZA_FEE") return "GUSIBUZA_FEE";
   if (type.startsWith("SOCIAL_FUND_CONTRIBUTION") || txType === "SOCIAL_FUND") return "SOCIAL_FUND";
   if (type === "LOAN_DISBURSEMENT" || txType === "LOAN_DISBURSEMENT") return "LOAN_DISBURSEMENT";
+  if (type === "SHARE_OUT_DISTRIBUTION") return "SHARE_OUT_PAYOUT";
   if (type === "LOAN_PRINCIPAL_REPAYMENT" || type === "LOAN_INTEREST_REPAYMENT" || txType === "LOAN_REPAYMENT") return "LOAN_REPAYMENT";
   if (type === "LEGACY_REPAYMENT") return "LEGACY_REPAYMENT";
   return "OTHER";
@@ -32,6 +33,7 @@ function entryLabel(category, entryType, transactionType, isReversal = false) {
       GUSIBUZA_FEE: "Gusibuza fee correction",
       LOAN_DISBURSEMENT: "Loan disbursement correction",
       LOAN_REPAYMENT: "Loan repayment correction",
+      SHARE_OUT_PAYOUT: "Cycle share-out payout correction",
     }[originalCategory] || "Financial correction";
     return originalLabel;
   }
@@ -46,6 +48,7 @@ function entryLabel(category, entryType, transactionType, isReversal = false) {
     LEGACY_REPAYMENT: "Historical loan repayment — split unavailable",
     LOAN_PRINCIPAL_REPAYMENT: "Loan principal repaid",
     LOAN_INTEREST_REPAYMENT: "Loan interest/service charge paid",
+    SHARE_OUT_DISTRIBUTION: "Cycle share-out payout",
   };
   return labels[type] || labels[String(entryType || "").toUpperCase()] || String(entryType || "Financial activity").replaceAll("_", " ").toLowerCase();
 }

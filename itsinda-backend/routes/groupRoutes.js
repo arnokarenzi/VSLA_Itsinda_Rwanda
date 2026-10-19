@@ -113,10 +113,11 @@ router.get(
     try {
       const { groupId } = req.params;
       const [rows] = await db.query(
-        `SELECT id, group_id, cycle_number, start_date, end_date, status
+        `SELECT id, group_id, cycle_number, DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
+               DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date, status
          FROM cycles
-         WHERE group_id = ? AND status = 'ACTIVE'
-         ORDER BY cycle_number DESC, id DESC
+         WHERE group_id = ? AND status IN ('ACTIVE', 'CLOSING')
+         ORDER BY CASE WHEN status = 'CLOSING' THEN 0 ELSE 1 END, cycle_number DESC, id DESC
          LIMIT 1`,
         [groupId],
       );
@@ -124,7 +125,7 @@ router.get(
       if (rows.length === 0) {
         return res.status(404).json({
           success: false,
-          message: "No active cycle exists for this group. Run the active-cycle migration or create a cycle before continuing.",
+          message: "No active cycle exists for this group. A leadership member must complete the prior cycle or ask an administrator to create the initial cycle.",
         });
       }
 

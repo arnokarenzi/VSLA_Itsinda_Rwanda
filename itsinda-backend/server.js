@@ -71,6 +71,7 @@ const cashbookRoutes = require("./routes/cashbookRoutes");
 const recordsRoutes = require("./routes/recordsRoutes");
 const constitutionRoutes = require("./routes/constitutionRoutes");
 const passbookRoutes = require("./routes/passbookRoutes");
+const cycleRoutes = require("./routes/cycleRoutes");
 
 app.get("/api/health", (req, res) => res.status(200).json({ success: true, status: "ok" }));
 app.get("/api/health/ready", async (req, res) => {
@@ -86,6 +87,7 @@ app.get("/api/health/ready", async (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/groups", groupRoutes);
 app.use("/api/groups", constitutionRoutes);
+app.use("/api/groups", cycleRoutes);
 app.use("/api", meetingRoutes);
 app.use("/api", loanRoutes);
 app.use("/api", fineRoutes);

@@ -122,20 +122,21 @@ export default function LoanOperations({
 
   useEffect(() => {
     let isCurrentRequest = true;
+    setMemberLoans([]);
+    setMemberFines([]);
+    setSelectedLoanId("");
 
     if (
       !Number.isSafeInteger(groupId) || groupId <= 0 ||
       !Number.isSafeInteger(Number(activeCycleId)) || Number(activeCycleId) <= 0 ||
       !Number.isSafeInteger(Number(repaymentMemberId)) || Number(repaymentMemberId) <= 0
     ) {
+      setLoadingMemberLoans(false);
       return () => { isCurrentRequest = false; };
     }
 
     const fetchOutstandingLoans = async () => {
       setLoadingMemberLoans(true);
-      setMemberLoans([]);
-      setMemberFines([]);
-      setSelectedLoanId("");
       try {
         const response = await API.get(`/groups/${groupId}/loans/outstanding`, {
           params: { cycleId: Number(activeCycleId), memberId: Number(repaymentMemberId) },

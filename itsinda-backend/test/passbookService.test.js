@@ -156,3 +156,17 @@ test("gusibuza fee is clearly labeled in the member passbook without being count
   assert.equal(result.events[0].activity, "Gusibuza / late-share fee");
   assert.equal(result.summary.savingsBalance, 0);
 });
+
+test("cycle share-out payout appears in the member passbook as a cash payout", () => {
+  const payout = row({
+    id: 90, member_id: 15, entry_type: "SHARE_OUT_DISTRIBUTION", source_type: "CYCLE_PAYOUT",
+    source_id: "12", source_component: "TOTAL", transaction_id: null, transaction_type: null,
+    amount: "3450.50", direction: "OUT", notes: "Cycle 1 share-out payment",
+  });
+  const result = buildPassbookEvents([payout]);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].category, "SHARE_OUT_PAYOUT");
+  assert.equal(result.events[0].activity, "Cycle share-out payout");
+  assert.equal(result.events[0].amount, 3450.5);
+  assert.equal(result.events[0].direction, "OUT");
+});
