@@ -232,6 +232,8 @@ async function getCashbookReport(groupId, cycleId, { connection: suppliedConnect
           e.notes, e.meeting_id, e.member_id, e.loan_id, e.created_at, e.reversal_of_entry_id,
           e.source_type, e.source_id, e.source_component,
           source_tx.status AS source_transaction_status, source_tx.type AS source_transaction_type,
+          source_tx.fine_reason AS source_transaction_fine_reason,
+          source_tx.shares_count AS source_transaction_shares_count,
           maker.full_name AS created_by_name, member.full_name AS member_name
        FROM fund_ledger_entries e
        LEFT JOIN users maker ON maker.id = e.created_by
@@ -241,6 +243,49 @@ async function getCashbookReport(groupId, cycleId, { connection: suppliedConnect
        ORDER BY e.id DESC LIMIT 30`,
       [groupId, cycleId],
     );
+
+    // Separate full-cycle candidate list: reversal selection must not be limited to
+    // the latest 30 rows, and must exclude already-reversed entries.
+    const [reversalRows] = await connection.query(
+      `SELECT e.id, e.fund_type, e.entry_type, e.direction, e.amount, e.profit_effect,
+          e.notes, e.meeting_id, e.member_id, e.loan_id, e.created_at, e.reversal_of_entry_id,
+          e.source_type, e.source_id, e.source_component,
+          source_tx.status AS source_transaction_status, source_tx.type AS source_transaction_type,
+          source_tx.fine_reason AS source_transaction_fine_reason,
+          source_tx.shares_count AS source_transaction_shares_count,
+          maker.full_name AS created_by_name, member.full_name AS member_name
+       FROM fund_ledger_entries e
+       LEFT JOIN transactions source_tx ON e.source_type = 'TRANSACTION' AND e.source_id = source_tx.id
+       LEFT JOIN users member ON member.id = COALESCE(e.member_id, source_tx.member_id)
+       LEFT JOIN users maker ON maker.id = e.created_by
+       WHERE e.group_id = ? AND e.cycle_id = ? AND e.reversal_of_entry_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM fund_ledger_entries rev WHERE rev.reversal_of_entry_id = e.id)
+         AND (
+           (e.source_type = 'TRANSACTION' AND e.source_component = 'TOTAL'
+             AND source_tx.status = 'POSTED' AND source_tx.type IN ('SHARE_PURCHASE','FINE_PAYMENT','SOCIAL_FUND'))
+           OR (e.source_type IS NULL AND e.loan_id IS NULL
+             AND e.entry_type IN ('OPENING_BALANCE','FUND_EXPENSE','SOCIAL_FUND_EXPENSE','CASH_ADJUSTMENT'))
+         )
+       ORDER BY e.id DESC`,
+      [groupId, cycleId],
+    );
+    const mapCashbookEntry = (row) => ({
+      id: Number(row.id), fundType: row.fund_type, entryType: row.entry_type, direction: row.direction,
+      amount: roundMoney(row.amount), profitEffect: roundMoney(row.profit_effect || 0), notes: row.notes || "",
+      meetingId: row.meeting_id == null ? null : Number(row.meeting_id),
+      memberId: row.member_id == null ? null : Number(row.member_id), loanId: row.loan_id == null ? null : Number(row.loan_id),
+      reversalOfEntryId: row.reversal_of_entry_id == null ? null : Number(row.reversal_of_entry_id),
+      sourceType: row.source_type || null, sourceId: row.source_id == null ? null : String(row.source_id),
+      sourceComponent: row.source_component || null, sourceTransactionStatus: row.source_transaction_status || null,
+      sourceTransactionType: row.source_transaction_type || null,
+      sourceTransactionFineReason: row.source_transaction_fine_reason || null,
+      sourceTransactionSharesCount: row.source_transaction_shares_count == null ? null : Number(row.source_transaction_shares_count),
+      correctionEligible: row.reversal_of_entry_id == null && (
+        (row.source_type === 'TRANSACTION' && row.source_component === 'TOTAL' && ['SHARE_PURCHASE','FINE_PAYMENT','SOCIAL_FUND'].includes(row.source_transaction_type) && row.source_transaction_status === 'POSTED') ||
+        (row.source_type == null && row.loan_id == null && ['OPENING_BALANCE','FUND_EXPENSE','SOCIAL_FUND_EXPENSE','CASH_ADJUSTMENT'].includes(row.entry_type))
+      ),
+      memberName: row.member_name || null, createdByName: row.created_by_name || "System migration", createdAt: row.created_at,
+    });
 
     return {
       groupId: Number(groupId),
@@ -254,31 +299,8 @@ async function getCashbookReport(groupId, cycleId, { connection: suppliedConnect
         count: Number(fineRows[0]?.outstanding_fine_count || 0),
         balance: roundMoney(fineRows[0]?.outstanding_fine_balance || 0),
       },
-      recentEntries: recentRows.map((row) => ({
-        id: Number(row.id),
-        fundType: row.fund_type,
-        entryType: row.entry_type,
-        direction: row.direction,
-        amount: roundMoney(row.amount),
-        profitEffect: roundMoney(row.profit_effect),
-        notes: row.notes || "",
-        meetingId: row.meeting_id == null ? null : Number(row.meeting_id),
-        memberId: row.member_id == null ? null : Number(row.member_id),
-        loanId: row.loan_id == null ? null : Number(row.loan_id),
-        reversalOfEntryId: row.reversal_of_entry_id == null ? null : Number(row.reversal_of_entry_id),
-        sourceType: row.source_type || null,
-        sourceId: row.source_id == null ? null : String(row.source_id),
-        sourceComponent: row.source_component || null,
-        sourceTransactionStatus: row.source_transaction_status || null,
-        sourceTransactionType: row.source_transaction_type || null,
-        correctionEligible: row.reversal_of_entry_id == null && (
-          (row.source_type === 'TRANSACTION' && row.source_component === 'TOTAL' && ['SHARE_PURCHASE','FINE_PAYMENT','SOCIAL_FUND'].includes(row.source_transaction_type) && row.source_transaction_status === 'POSTED') ||
-          (row.source_type == null && row.loan_id == null && ['OPENING_BALANCE','FUND_EXPENSE','SOCIAL_FUND_EXPENSE','CASH_ADJUSTMENT'].includes(row.entry_type))
-        ),
-        memberName: row.member_name || null,
-        createdByName: row.created_by_name || "System migration",
-        createdAt: row.created_at,
-      })),
+      recentEntries: recentRows.map(mapCashbookEntry),
+      eligibleReversals: reversalRows.map(mapCashbookEntry),
     };
   } catch (error) {
     if (error.statusCode) throw error;

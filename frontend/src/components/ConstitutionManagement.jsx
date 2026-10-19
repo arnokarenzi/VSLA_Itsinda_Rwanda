@@ -8,8 +8,11 @@ const EMPTY_FORM = {
   maxSharesPerMeeting: "",
   loanRatioLimit: "3",
   monthlyInterestPercent: "5",
-  interestMethod: "FLAT_PER_MONTH",
-  maxLoanDurationMonths: "12",
+  interestMethod: "FLAT_PER_PERIOD",
+  interestPeriodDays: "30",
+  gusibuzaEnabled: false,
+  gusibuzaFeeMode: "PER_SHARE",
+  gusibuzaFeeAmount: "100",
   socialFundMode: "FLEXIBLE",
   socialFundContributionAmount: "0",
   fineRulesText: "",
@@ -27,9 +30,12 @@ function formFromTerms(terms = {}) {
     minSharesPerMeeting: String(terms.minSharesPerMeeting ?? 1),
     maxSharesPerMeeting: terms.maxSharesPerMeeting == null ? "" : String(terms.maxSharesPerMeeting),
     loanRatioLimit: String(terms.loanRatioLimit ?? 3),
-    monthlyInterestPercent: String(Number(terms.monthlyInterestRate ?? 0.05) * 100),
-    interestMethod: terms.interestMethod || "FLAT_PER_MONTH",
-    maxLoanDurationMonths: String(terms.maxLoanDurationMonths ?? 12),
+    monthlyInterestPercent: String(Number(terms.interestRate ?? terms.monthlyInterestRate ?? 0.05) * 100),
+    interestMethod: terms.interestMethod === "FLAT_PER_MONTH" ? "FLAT_PER_PERIOD" : (terms.interestMethod || "FLAT_PER_PERIOD"),
+    interestPeriodDays: String(terms.interestPeriodDays ?? terms.maxLoanTermDays ?? (Number(terms.maxLoanDurationMonths ?? 1) * 30)),
+    gusibuzaEnabled: terms.gusibuzaEnabled === true,
+    gusibuzaFeeMode: terms.gusibuzaFeeMode || "PER_SHARE",
+    gusibuzaFeeAmount: String(terms.gusibuzaFeeAmount ?? 100),
     socialFundMode: terms.socialFundMode || "FLEXIBLE",
     socialFundContributionAmount: String(terms.socialFundContributionAmount ?? 0),
     fineRulesText: (Array.isArray(terms.fineRules) ? terms.fineRules : []).map((rule) => `${rule.label ?? rule.name}=${rule.amount}`).join("\n"),
@@ -62,8 +68,13 @@ function termsFromForm(form) {
     maxSharesPerMeeting: form.maxSharesPerMeeting.trim() === "" ? null : Number(form.maxSharesPerMeeting),
     loanRatioLimit: Number(form.loanRatioLimit),
     monthlyInterestRate: Number(form.monthlyInterestPercent) / 100,
+    interestRate: Number(form.monthlyInterestPercent) / 100,
     interestMethod: form.interestMethod,
-    maxLoanDurationMonths: Number(form.maxLoanDurationMonths),
+    interestPeriodDays: Number(form.interestPeriodDays),
+    maxLoanTermDays: Number(form.interestPeriodDays),
+    gusibuzaEnabled: Boolean(form.gusibuzaEnabled),
+    gusibuzaFeeMode: form.gusibuzaFeeMode,
+    gusibuzaFeeAmount: Number(form.gusibuzaFeeAmount || 0),
     socialFundMode: form.socialFundMode,
     socialFundContributionAmount: Number(form.socialFundContributionAmount || 0),
     fineRules: parseFineRules(form.fineRulesText),
@@ -196,11 +207,12 @@ export default function ConstitutionManagement({ user }) {
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Share price</p><p className="mt-1 font-bold text-slate-900">{money(terms.shareValue)}</p><p className="mt-1 text-xs text-slate-500">Minimum {terms.minSharesPerMeeting ?? 1} share(s) per member per meeting; maximum {terms.maxSharesPerMeeting == null ? "no configured cap" : `${terms.maxSharesPerMeeting} share(s)`}.</p></div>
-          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Borrowing limit</p><p className="mt-1 font-bold text-slate-900">{terms.loanRatioLimit ?? 3}× savings</p><p className="mt-1 text-xs text-slate-500">Maximum term: {terms.maxLoanDurationMonths ?? 12} month(s).</p></div>
-          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Interest/service charge</p><p className="mt-1 font-bold text-slate-900">{(Number(terms.monthlyInterestRate ?? 0.05) * 100).toLocaleString()}% {terms.interestMethod === "FLAT_ONCE" ? "once per loan" : "per month (flat)"}</p><p className="mt-1 text-xs text-slate-500">New loans only; already-issued loans keep their original amounts due.</p></div>
+          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Borrowing limit</p><p className="mt-1 font-bold text-slate-900">{terms.loanRatioLimit ?? 3}× savings</p><p className="mt-1 text-xs text-slate-500">Maximum initial term: {terms.maxLoanTermDays ?? terms.interestPeriodDays ?? (Number(terms.maxLoanDurationMonths ?? 1) * 30)} days.</p></div>
+          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Interest/service charge</p><p className="mt-1 font-bold text-slate-900">{(Number(terms.interestRate ?? terms.monthlyInterestRate ?? 0.05) * 100).toLocaleString()}% {terms.interestMethod === "FLAT_ONCE" ? "once per loan" : `per ${terms.interestPeriodDays ?? terms.maxLoanTermDays ?? 30} days on remaining principal`}</p><p className="mt-1 text-xs text-slate-500">The expected date is set automatically from the approved period. Earlier or later repayments change interest accrual only for loans using the periodic method. Existing loans retain their recorded terms.</p></div>
           <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Social Fund</p><p className="mt-1 font-bold text-slate-900">{terms.socialFundMode === "NONE" ? "Not collected" : terms.socialFundMode === "FIXED" ? `${money(terms.socialFundContributionAmount)} per member/meeting` : "Flexible contributions"}</p><p className="mt-1 text-xs text-slate-500">Kept separate from the Loan Fund.</p></div>
+          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Gusibuza / late share purchase</p><p className="mt-1 font-bold text-slate-900">{terms.gusibuzaEnabled ? `${terms.gusibuzaFeeMode === "PER_MEETING" ? "Fixed fee per missed meeting" : "Fee per late share"}: ${money(terms.gusibuzaFeeAmount)}` : "Not allowed"}</p><p className="mt-1 text-xs text-slate-500">Late shares are credited to the original closed meeting and cannot exceed that meeting&apos;s share limit.</p></div>
           <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Meeting cadence</p><p className="mt-1 font-bold text-slate-900">{terms.meetingFrequency === "CUSTOM" ? `Every ${terms.meetingIntervalDays} days` : ({ WEEKLY: "Weekly", FORTNIGHTLY: "Every two weeks", MONTHLY: "Monthly" }[terms.meetingFrequency] || "Weekly")}</p><p className="mt-1 text-xs text-slate-500">Expected savings cycle: {terms.cycleDurationMonths ?? 12} month(s).</p></div>
-          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Fine policy</p>{currentFineRules.length ? <ul className="mt-1 space-y-1 text-sm text-slate-800">{currentFineRules.map((rule, index) => <li key={`${rule.label}-${index}`}>{rule.label}: {money(rule.amount)}</li>)}</ul> : <p className="mt-1 text-sm text-slate-700">No named fine amounts configured.</p>}<p className="mt-1 text-xs text-slate-500">{terms.allowOtherFines === false ? "Only listed fine types are accepted." : "Other fines may be recorded with a reason."}</p></div>
+          <div className="rounded-xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Fine policy</p>{currentFineRules.length ? <ul className="mt-1 space-y-1 text-sm text-slate-800">{currentFineRules.map((rule, index) => <li key={`${rule.label}-${index}`}>{rule.label}: {money(rule.amount)}{["absence without excuse", "absent without excuse"].includes(String(rule.label || rule.name || "").toLocaleLowerCase()) ? " (assessed automatically when meeting closes)" : ""}</li>)}</ul> : <p className="mt-1 text-sm text-slate-700">No named fine amounts configured.</p>}<p className="mt-1 text-xs text-slate-500">{terms.allowOtherFines === false ? "Only listed fine types are accepted." : "Other fines may be recorded with a reason."}</p></div>
         </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <div className="rounded-xl border border-slate-200 p-4"><h3 className="font-semibold text-slate-800">Member withdrawal policy</h3><p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">{terms.withdrawalPolicy || "Not documented."}</p></div>
@@ -226,8 +238,9 @@ export default function ConstitutionManagement({ user }) {
               <p><strong>Share price:</strong> {money(pending.terms.shareValue)}</p>
               <p><strong>Shares/member/meeting:</strong> minimum {pending.terms.minSharesPerMeeting}; maximum {pending.terms.maxSharesPerMeeting == null ? "no cap" : pending.terms.maxSharesPerMeeting}</p>
               <p><strong>Loan cap:</strong> {pending.terms.loanRatioLimit}× savings</p>
-              <p><strong>Interest/service charge:</strong> {(Number(pending.terms.monthlyInterestRate) * 100).toLocaleString()}% {pending.terms.interestMethod === "FLAT_ONCE" ? "once per loan" : "per month (flat)"}</p>
-              <p><strong>Maximum loan term:</strong> {pending.terms.maxLoanDurationMonths} months</p>
+              <p><strong>Interest/service charge:</strong> {(Number(pending.terms.interestRate ?? pending.terms.monthlyInterestRate) * 100).toLocaleString()}% {pending.terms.interestMethod === "FLAT_ONCE" ? "once per loan" : `per ${pending.terms.interestPeriodDays || pending.terms.maxLoanTermDays || 30} days on outstanding principal`}</p>
+              <p><strong>Maximum initial loan term:</strong> {pending.terms.maxLoanTermDays || pending.terms.interestPeriodDays || 30} days</p>
+              <p><strong>Gusibuza:</strong> {pending.terms.gusibuzaEnabled ? `${pending.terms.gusibuzaFeeMode === "PER_MEETING" ? "fixed per missed meeting" : "per late share"} · ${money(pending.terms.gusibuzaFeeAmount)}` : "Not enabled"}</p>
               <p><strong>Social Fund:</strong> {pending.terms.socialFundMode === "FIXED" ? `${money(pending.terms.socialFundContributionAmount)} per member/meeting` : pending.terms.socialFundMode}</p>
               <p><strong>Meeting frequency:</strong> {pending.terms.meetingFrequency === "CUSTOM" ? `every ${pending.terms.meetingIntervalDays} days` : ({ WEEKLY: "weekly", FORTNIGHTLY: "every two weeks", MONTHLY: "monthly" }[pending.terms.meetingFrequency] || "weekly")}</p>
               <p><strong>Cycle duration:</strong> {pending.terms.cycleDurationMonths} months</p>
@@ -251,11 +264,14 @@ export default function ConstitutionManagement({ user }) {
                 <Field label="Minimum shares per member per meeting"><input className={inputClass} type="number" min="0" step="1" required value={form.minSharesPerMeeting} onChange={(e) => updateForm("minSharesPerMeeting", e.target.value)} /></Field>
                 <Field label="Maximum shares per member per meeting" help="Leave blank for no configured maximum."><input className={inputClass} type="number" min="1" step="1" value={form.maxSharesPerMeeting} onChange={(e) => updateForm("maxSharesPerMeeting", e.target.value)} /></Field>
                 <Field label="Loan limit (multiple of savings)"><input className={inputClass} type="number" min="0.1" max="100" step="0.1" required value={form.loanRatioLimit} onChange={(e) => updateForm("loanRatioLimit", e.target.value)} /></Field>
-                <Field label="Interest/service charge (%)" help="Enter 5 for 5%, not 0.05."><input className={inputClass} type="number" min="0" max="100" step="0.01" required value={form.monthlyInterestPercent} onChange={(e) => updateForm("monthlyInterestPercent", e.target.value)} /></Field>
-                <Field label="Interest calculation method"><select className={inputClass} value={form.interestMethod} onChange={(e) => updateForm("interestMethod", e.target.value)}><option value="FLAT_PER_MONTH">Flat rate for every loan month</option><option value="FLAT_ONCE">One-time flat rate per loan</option></select></Field>
-                <Field label="Maximum loan term (months)"><input className={inputClass} type="number" min="1" max="60" step="1" required value={form.maxLoanDurationMonths} onChange={(e) => updateForm("maxLoanDurationMonths", e.target.value)} /></Field>
+                <Field label="Interest/service charge (%)" help="Enter 5 for 5%, not 0.05. For periodic interest this percentage applies each set period (days) to the remaining principal; the one-time method charges it once per loan."><input className={inputClass} type="number" min="0" max="100" step="0.01" required value={form.monthlyInterestPercent} onChange={(e) => updateForm("monthlyInterestPercent", e.target.value)} /></Field>
+                <Field label="Interest/service-charge method"><select className={inputClass} value={form.interestMethod} onChange={(e) => updateForm("interestMethod", e.target.value)}><option value="FLAT_ONCE">One-time flat rate per loan</option><option value="FLAT_PER_PERIOD">Flat rate for every set period (days)</option></select></Field>
+                <Field label="Set period and maximum initial loan term (days)" help="This period determines the due date. Under the per-period method, interest accrues for each completed period on the remaining principal. A loan can still be repaid earlier or later."><input className={inputClass} type="number" min="1" max="3660" step="1" required value={form.interestPeriodDays} onChange={(e) => updateForm("interestPeriodDays", e.target.value)} /></Field>
                 <Field label="Social Fund contribution rule"><select className={inputClass} value={form.socialFundMode} onChange={(e) => updateForm("socialFundMode", e.target.value)}><option value="NONE">No regular Social Fund contribution</option><option value="FLEXIBLE">Flexible amount</option><option value="FIXED">Fixed amount per member per meeting</option></select></Field>
                 <Field label="Fixed Social Fund amount (RWF)" help="Required only when fixed amount is selected."><input className={inputClass} type="number" min="0" step="0.01" disabled={form.socialFundMode !== "FIXED"} required={form.socialFundMode === "FIXED"} value={form.socialFundContributionAmount} onChange={(e) => updateForm("socialFundContributionAmount", e.target.value)} /></Field>
+                <Field label="Gusibuza / late share purchase"><select className={inputClass} value={form.gusibuzaEnabled ? "YES" : "NO"} onChange={(e) => updateForm("gusibuzaEnabled", e.target.value === "YES")}><option value="NO">Not allowed</option><option value="YES">Allowed under these rules</option></select></Field>
+                <Field label="Gusibuza fee method"><select className={inputClass} value={form.gusibuzaFeeMode} onChange={(e) => updateForm("gusibuzaFeeMode", e.target.value)} disabled={!form.gusibuzaEnabled}><option value="PER_SHARE">Fee for each late share</option><option value="PER_MEETING">One fixed fee per missed meeting</option></select></Field>
+                <Field label="Gusibuza fee (RWF)" help={form.gusibuzaFeeMode === "PER_MEETING" ? "Charged once per member for each target meeting, regardless of the number of late shares." : "Charged for each late share purchased."}><input className={inputClass} type="number" min="0.01" step="0.01" required={form.gusibuzaEnabled} disabled={!form.gusibuzaEnabled} value={form.gusibuzaFeeAmount} onChange={(e) => updateForm("gusibuzaFeeAmount", e.target.value)} /></Field>
                 <Field label="Meeting frequency"><select className={inputClass} value={form.meetingFrequency} onChange={(e) => handleFrequencyChange(e.target.value)}><option value="WEEKLY">Weekly</option><option value="FORTNIGHTLY">Every two weeks</option><option value="MONTHLY">Monthly</option><option value="CUSTOM">Custom interval</option></select></Field>
                 <Field label="Meeting interval (days)" help="Automatically set for weekly/fortnightly/monthly; editable for custom."><input className={inputClass} type="number" min="1" max="366" step="1" required disabled={form.meetingFrequency !== "CUSTOM"} value={form.meetingIntervalDays} onChange={(e) => updateForm("meetingIntervalDays", e.target.value)} /></Field>
                 <Field label="Savings cycle duration (months)"><input className={inputClass} type="number" min="1" max="36" step="1" required value={form.cycleDurationMonths} onChange={(e) => updateForm("cycleDurationMonths", e.target.value)} /></Field>

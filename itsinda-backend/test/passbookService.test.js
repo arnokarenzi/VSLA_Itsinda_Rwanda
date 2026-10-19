@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { buildPassbookEvents } = require("../services/passbookHelpers");
+const { buildPassbookEvents, activityForEntry, entryLabel } = require("../services/passbookHelpers");
 
 function row(overrides = {}) {
   return {
@@ -140,4 +140,19 @@ test("repayment amount can be reconstructed from ledger components when an older
   assert.equal(result.events[0].amount, 800);
   assert.equal(result.events[0].principalAmount, 700);
   assert.equal(result.events[0].interestAmount, 100);
+});
+
+
+test("gusibuza fee is clearly labeled in the member passbook without being counted as savings", () => {
+  assert.equal(activityForEntry("GUSIBUZA_FEE", "GUSIBUZA_FEE"), "GUSIBUZA_FEE");
+  assert.equal(entryLabel("GUSIBUZA_FEE", "GUSIBUZA_FEE", "GUSIBUZA_FEE"), "Gusibuza / late-share fee");
+  const fee = row({
+    id: 60, source_id: 60, transaction_id: 60, entry_type: "GUSIBUZA_FEE", source_component: "TOTAL",
+    transaction_type: "GUSIBUZA_FEE", amount: "100.00", transaction_amount: "100.00", shares_count: 0,
+    fine_reason: "Gusibuza fee for Meeting #1",
+  });
+  const result = buildPassbookEvents([fee]);
+  assert.equal(result.events[0].category, "GUSIBUZA_FEE");
+  assert.equal(result.events[0].activity, "Gusibuza / late-share fee");
+  assert.equal(result.summary.savingsBalance, 0);
 });

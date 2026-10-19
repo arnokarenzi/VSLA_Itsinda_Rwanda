@@ -1,7 +1,7 @@
 const db = require("../config/db");
 const { writeAuditEvent } = require("./auditService");
 
-const ATTENDANCE_STATUSES = new Set(["PRESENT", "ABSENT", "EXCUSED", "NOT_RECORDED"]);
+const ATTENDANCE_STATUSES = new Set(["PRESENT", "ABSENT", "EXCUSED"]);
 const MAX_TEXT = 12000;
 function cleanText(value, label) {
   const text = String(value ?? "").trim();
@@ -58,10 +58,36 @@ async function getMeetingRecord(groupId, cycleId, meetingId) {
         a.updated_at AS attendance_updated_at
      FROM users u
      LEFT JOIN meeting_attendance a ON a.member_id = u.id AND a.meeting_id = ?
-     WHERE u.group_id = ?
+     WHERE u.group_id = ? AND (COALESCE(u.is_active, 1) = 1 OR a.id IS NOT NULL)
      ORDER BY u.is_active DESC, u.full_name ASC`,
     [meetingId, groupId],
   );
+  const [summaryRows] = await db.query(
+    `SELECT member_id,
+        COALESCE(SUM(CASE WHEN type = 'SHARE_PURCHASE' AND COALESCE(credited_meeting_id, meeting_id) = ? AND status = 'POSTED' THEN shares_count ELSE 0 END), 0) AS shares_credited_for_meeting,
+        COALESCE(SUM(CASE WHEN meeting_id = ? AND type = 'SHARE_PURCHASE' AND COALESCE(credited_meeting_id, meeting_id) <> meeting_id AND status = 'POSTED' THEN shares_count ELSE 0 END), 0) AS gusibuza_shares_bought_now,
+        COALESCE(SUM(CASE WHEN meeting_id = ? AND type = 'SOCIAL_FUND' AND status = 'POSTED' THEN amount ELSE 0 END), 0) AS social_fund_paid,
+        COALESCE(SUM(CASE WHEN meeting_id = ? AND type = 'GUSIBUZA_FEE' AND status = 'POSTED' THEN amount ELSE 0 END), 0) AS gusibuza_fees_paid
+     FROM transactions
+     WHERE group_id = ? AND cycle_id = ? AND (meeting_id = ? OR credited_meeting_id = ?)
+     GROUP BY member_id`,
+    [meetingId, meetingId, meetingId, meetingId, groupId, cycleId, meetingId, meetingId],
+  );
+  const [fineSummaryRows] = await db.query(
+    `SELECT member_id, COALESCE(SUM(CASE WHEN status <> 'REVERSED' THEN amount ELSE 0 END), 0) AS assessed,
+        COALESCE(SUM(CASE WHEN status <> 'REVERSED' THEN amount_paid ELSE 0 END), 0) AS paid
+     FROM fine_assessments WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? GROUP BY member_id`,
+    [groupId, cycleId, meetingId],
+  );
+  const summaryByMember = new Map(summaryRows.map((row) => [Number(row.member_id), {
+    sharesCreditedForMeeting: Number(row.shares_credited_for_meeting || 0),
+    gusibuzaSharesBoughtNow: Number(row.gusibuza_shares_bought_now || 0),
+    socialFundPaid: Number(row.social_fund_paid || 0),
+    gusibuzaFeesPaid: Number(row.gusibuza_fees_paid || 0),
+  }]));
+  const fineSummaryByMember = new Map(fineSummaryRows.map((row) => [Number(row.member_id), {
+    finesAssessed: Number(row.assessed || 0), finesPaid: Number(row.paid || 0),
+  }]));
   const record = recordRows[0] || {};
   return {
     meeting: {
@@ -73,6 +99,7 @@ async function getMeetingRecord(groupId, cycleId, meetingId) {
       memberId: Number(row.id), fullName: row.full_name, phoneNumber: row.phone_number,
       isActive: Number(row.is_active) !== 0, status: row.attendance_status, notes: row.attendance_notes || "",
       updatedAt: row.attendance_updated_at || null,
+      summary: { ...(summaryByMember.get(Number(row.id)) || { sharesCreditedForMeeting: 0, gusibuzaSharesBoughtNow: 0, socialFundPaid: 0, gusibuzaFeesPaid: 0 }), ...(fineSummaryByMember.get(Number(row.id)) || { finesAssessed: 0, finesPaid: 0 }) },
     })),
   };
 }
@@ -114,15 +141,16 @@ async function saveMeetingRecord({ groupId, cycleId, meetingId, actorUserId, age
     const seen = new Set();
     for (const item of attendance) {
       const memberId = Number(item.memberId);
-      const status = String(item.status || "NOT_RECORDED").toUpperCase();
+      const status = String(item.status || "").toUpperCase();
       if (!Number.isSafeInteger(memberId) || memberId <= 0 || !ATTENDANCE_STATUSES.has(status)) {
-        throw new Error("Each attendance row needs a valid member and attendance status.");
+        throw new Error("Mark every member as Present, Absent, or Excused before saving the attendance register.");
       }
       if (seen.has(memberId)) throw new Error("A member appears more than once in the attendance list.");
       seen.add(memberId);
-      const [memberRows] = await connection.query("SELECT id FROM users WHERE id = ? AND group_id = ?", [memberId, groupId]);
+      const [memberRows] = await connection.query("SELECT id, full_name FROM users WHERE id = ? AND group_id = ?", [memberId, groupId]);
       if (!memberRows.length) throw new Error("Attendance cannot be recorded for a member from another group.");
       const notes = String(item.notes || "").trim().slice(0, 500) || null;
+      if (status === "EXCUSED" && !notes) throw new Error(`Enter the reason ${memberRows[0]?.full_name ? `for ${memberRows[0].full_name} ` : ""}is excused from this meeting.`);
       await connection.query(
         `INSERT INTO meeting_attendance
           (group_id, cycle_id, meeting_id, member_id, attendance_status, notes, recorded_by, updated_by)
@@ -132,7 +160,7 @@ async function saveMeetingRecord({ groupId, cycleId, meetingId, actorUserId, age
       );
     }
 
-    const after = { ...nextRecord, attendance: attendance.map((item) => ({ memberId: Number(item.memberId), status: String(item.status || "NOT_RECORDED").toUpperCase(), notes: String(item.notes || "").trim().slice(0, 500) })) };
+    const after = { ...nextRecord, attendance: attendance.map((item) => ({ memberId: Number(item.memberId), status: String(item.status || "").toUpperCase(), notes: String(item.notes || "").trim().slice(0, 500) })) };
     await writeAuditEvent(connection, {
       groupId, cycleId, meetingId, actorUserId, action: "MEETING_RECORDS_UPDATED", entityType: "MEETING_RECORD", entityId: meetingId,
       beforeData: before || beforeAttendanceRows.length ? {

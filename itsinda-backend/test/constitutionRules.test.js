@@ -43,7 +43,8 @@ test("legacy settings are imported without changing their existing loan terms", 
   assert.equal(terms.loanRatioLimit, 2);
   assert.equal(terms.monthlyInterestRate, 0.04);
   assert.equal(terms.maxLoanDurationMonths, 6);
-  assert.equal(terms.interestMethod, "FLAT_PER_MONTH");
+  assert.equal(terms.interestMethod, "FLAT_PER_PERIOD");
+  assert.equal(terms.interestPeriodDays, 180);
 });
 
 test("member voting requires an absolute majority of active users", () => {
@@ -62,24 +63,24 @@ test("interest calculation uses the approved method and rounds to cents", () => 
 
 test("meeting contribution rules enforce share minimum and per-meeting maximum", () => {
   const { validateMeetingContributions } = require("../services/constitutionRules");
-  assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 2 }, sharePurchases: [{ sharesCount: 1 }] }), /at least 2 share/);
-  assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, maxSharesPerMeeting: 3 }, existingSharesThisMeeting: 2, sharePurchases: [{ sharesCount: 2 }] }), /exceed the constitution's limit/);
-  assert.equal(validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, maxSharesPerMeeting: 3 }, existingSharesThisMeeting: 1, sharePurchases: [{ sharesCount: 2 }] }).totalSharesThisMeeting, 3);
+  assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 2 }, attendanceStatus: "PRESENT", sharePurchases: [{ sharesCount: 1 }] }), /at least 2 share/);
+  assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, maxSharesPerMeeting: 3 }, attendanceStatus: "PRESENT", existingSharesThisMeeting: 2, sharePurchases: [{ sharesCount: 2 }] }), /exceed the constitution's limit/);
+  assert.equal(validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, maxSharesPerMeeting: 3 }, attendanceStatus: "PRESENT", existingSharesThisMeeting: 1, sharePurchases: [{ sharesCount: 2 }] }).totalSharesThisMeeting, 3);
 });
 
 test("meeting contribution rules enforce no-social and fixed-social policies", () => {
   const { validateMeetingContributions } = require("../services/constitutionRules");
-  assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, socialFundMode: "NONE" }, socialFundTransactions: [{ amount: 100 }] }), /does not allow Social Fund/);
+  assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, socialFundMode: "NONE" }, attendanceStatus: "PRESENT", socialFundTransactions: [{ amount: 100 }] }), /does not allow Social Fund/);
   assert.throws(() => validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, socialFundMode: "FIXED", socialFundContributionAmount: 1000 }, attendanceStatus: "PRESENT", existingSocialFundAmount: 700, socialFundTransactions: [{ amount: 400 }] }), /must contribute exactly 1,000/);
   assert.equal(validateMeetingContributions({ terms: { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, socialFundMode: "FIXED", socialFundContributionAmount: 1000 }, attendanceStatus: "PRESENT", existingSocialFundAmount: 500, socialFundTransactions: [{ amount: 500 }] }).totalSocialFundThisMeeting, 1000);
 });
 
 test("meeting contribution rules require approved fine types and amounts when configured", () => {
   const { validateMeetingContributions } = require("../services/constitutionRules");
-  const terms = { ...DEFAULT_CONSTITUTION, fineRules: [{ label: "Late arrival", amount: 500 }], allowOtherFines: false };
-  assert.throws(() => validateMeetingContributions({ terms, fineTransactions: [{ fineReason: "Absence", amount: 1000 }] }), /not listed in the group constitution/);
-  assert.throws(() => validateMeetingContributions({ terms, fineTransactions: [{ fineReason: "Late arrival", amount: 1000 }] }), /does not match/);
-  assert.equal(validateMeetingContributions({ terms, fineTransactions: [{ fineReason: "Late arrival", amount: 500 }] }).requestedShares, 0);
+  const terms = { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, fineRules: [{ label: "Late arrival", amount: 500 }], allowOtherFines: false };
+  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "PRESENT", fineTransactions: [{ fineReason: "Absence", amount: 1000 }] }), /not listed in the group constitution/);
+  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "PRESENT", fineTransactions: [{ fineReason: "Late arrival", amount: 1000 }] }), /does not match/);
+  assert.equal(validateMeetingContributions({ terms, attendanceStatus: "PRESENT", fineTransactions: [{ fineReason: "Late arrival", amount: 500 }] }).requestedShares, 0);
 });
 
 
@@ -92,20 +93,21 @@ test("fixed Social Fund requires the exact amount from present members", () => {
   assert.equal(validateMeetingContributions({ terms, attendanceStatus: "PRESENT", sharePurchases: [{ sharesCount: 1 }], socialFundTransactions: [{ amount: 100 }] }).totalSocialFundThisMeeting, 100);
 });
 
-test("fixed Social Fund lets explicitly absent or excused members skip the fixed payment", () => {
+test("absent and excused members are exempt from Social Fund but cannot record meeting transactions", () => {
   const { validateMeetingContributions } = require("../services/constitutionRules");
   const terms = { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, socialFundMode: "FIXED", socialFundContributionAmount: 100 };
-  assert.equal(validateMeetingContributions({ terms, attendanceStatus: "ABSENT", sharePurchases: [{ sharesCount: 1 }], socialFundTransactions: [] }).requestedSocialFund, 0);
-  assert.equal(validateMeetingContributions({ terms, attendanceStatus: "EXCUSED", sharePurchases: [{ sharesCount: 1 }], socialFundTransactions: [] }).requestedSocialFund, 0);
-  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "ABSENT", socialFundTransactions: [{ amount: 100 }] }), /marked absent or excused/);
-  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: null, sharePurchases: [{ sharesCount: 1 }], socialFundTransactions: [{ amount: 100 }] }), /Record this member's attendance/);
+  assert.equal(validateMeetingContributions({ terms, attendanceStatus: "ABSENT" }).requestedSocialFund, 0);
+  assert.equal(validateMeetingContributions({ terms, attendanceStatus: "EXCUSED" }).requestedSocialFund, 0);
+  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "ABSENT", sharePurchases: [{ sharesCount: 1 }] }), /Only members marked Present/);
+  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "EXCUSED", socialFundTransactions: [{ amount: 100 }] }), /Only members marked Present/);
+  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: null, sharePurchases: [{ sharesCount: 1 }], socialFundTransactions: [{ amount: 100 }] }), /Only members marked Present/);
 });
 
-test("minimum shares is enforced when social contributions are recorded regardless of attendance status", () => {
+test("minimum shares is enforced for present members when contribution activity is recorded", () => {
   const { validateMeetingContributions } = require("../services/constitutionRules");
   const terms = { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 1, socialFundMode: "FLEXIBLE" };
   assert.throws(() => validateMeetingContributions({ terms, socialFundTransactions: [{ amount: 100 }], attendanceStatus: "PRESENT" }), /requires at least 1 share/);
-  assert.throws(() => validateMeetingContributions({ terms, socialFundTransactions: [{ amount: 100 }], attendanceStatus: "ABSENT" }), /requires at least 1 share/);
+  assert.throws(() => validateMeetingContributions({ terms, socialFundTransactions: [{ amount: 100 }], attendanceStatus: "ABSENT" }), /Only members marked Present/);
   assert.equal(validateMeetingContributions({ terms, existingSharesThisMeeting: 1, socialFundTransactions: [{ amount: 100 }], attendanceStatus: "PRESENT" }).totalSharesThisMeeting, 1);
   assert.equal(validateMeetingContributions({ terms: { ...terms, minSharesPerMeeting: 0 }, socialFundTransactions: [{ amount: 100 }], attendanceStatus: "PRESENT" }).totalSharesThisMeeting, 0);
 });
@@ -115,7 +117,7 @@ test("fixed Social Fund cannot be bypassed by recording only a fine for a presen
   const terms = { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 0, socialFundMode: "FIXED", socialFundContributionAmount: 100 };
   assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "PRESENT", hasFineAssessment: true }), /must contribute exactly 100 RWF/);
   assert.doesNotThrow(() => validateMeetingContributions({ terms, attendanceStatus: "PRESENT", existingSocialFundAmount: 100, hasFineAssessment: true }));
-  assert.doesNotThrow(() => validateMeetingContributions({ terms, attendanceStatus: "ABSENT", hasFineAssessment: true }));
+  assert.throws(() => validateMeetingContributions({ terms, attendanceStatus: "ABSENT", hasFineAssessment: true }), /Only members marked Present/);
 });
 
 test("meeting closure requires exact fixed Social Fund from each present active member and recorded attendance", () => {
@@ -142,4 +144,10 @@ test("fine assessment uses approved amounts and only allows custom amount for Ot
   assert.deepEqual(resolveFineAssessment(settings, { ruleLabel: "OTHER", otherReason: "Damaged group property", otherAmount: 750 }), { fineLabel: "Other", reason: "Damaged group property", amount: 750 });
   assert.throws(() => resolveFineAssessment({ ...settings, allowOtherFines: false }, { ruleLabel: "OTHER", otherReason: "Damaged property", otherAmount: 750 }), /does not allow/);
   assert.throws(() => resolveFineAssessment(settings, { ruleLabel: "Unknown" }), /not in the current approved constitution/);
+});
+
+test("fine assessment does not itself trigger the minimum share-purchase check", () => {
+  const { validateMeetingContributions } = require("../services/constitutionRules");
+  const terms = { ...DEFAULT_CONSTITUTION, minSharesPerMeeting: 1, socialFundMode: "FLEXIBLE", fineRules: [{ label: "Late arrival", amount: 500 }], allowOtherFines: false };
+  assert.equal(validateMeetingContributions({ terms, attendanceStatus: "PRESENT", fineTransactions: [{ fineReason: "Late arrival", amount: 500 }] }).requestedShares, 0);
 });

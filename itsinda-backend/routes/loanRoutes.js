@@ -38,17 +38,9 @@ router.post(
   async (req, res) => {
     try {
       const { groupId } = req.params;
-      const { cycleId, memberId, principalAmount, durationMonths, dueDate, meetingId } = req.body;
+      const { cycleId, memberId, principalAmount, meetingId } = req.body;
       const loan = await issueLoan(
-        groupId,
-        cycleId,
-        memberId,
-        principalAmount,
-        durationMonths,
-        dueDate,
-        meetingId,
-        req.user.id,
-        auditMetaFor(req),
+        groupId, cycleId, memberId, principalAmount, meetingId, req.user.id, auditMetaFor(req),
       );
       res.status(201).json({ success: true, message: "Loan issued successfully", loan });
     } catch (error) {

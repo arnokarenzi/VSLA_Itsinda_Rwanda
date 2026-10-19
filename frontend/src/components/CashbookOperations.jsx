@@ -8,7 +8,9 @@ export default function CashbookOperations({ user, activeCycleId }) {
   const groupId = Number(user?.groupId ?? user?.group_id);
   const [report, setReport] = useState(null);
   const [openMeetings, setOpenMeetings] = useState([]);
-  const [members, setMembers] = useState([]);
+  const [presentWitnessMembers, setPresentWitnessMembers] = useState([]);
+  const [witnessListMessage, setWitnessListMessage] = useState("");
+  const [witnessRefreshToken, setWitnessRefreshToken] = useState(0);
   const [witnessMemberId, setWitnessMemberId] = useState("");
   const [meetingId, setMeetingId] = useState("");
   const [loading, setLoading] = useState(false);
@@ -65,17 +67,37 @@ export default function CashbookOperations({ user, activeCycleId }) {
   useEffect(() => {
     void loadReport();
     void loadMeetings();
+  }, [loadReport, loadMeetings]);
+
+  // A witness must be marked Present in the selected open meeting, not merely be
+  // an active group member. The backend repeats this check before saving the count.
+  useEffect(() => {
     let isMounted = true;
-    API.get(`/groups/${groupId}/members`).then((response) => {
-      if (!isMounted || !response.data.success) return;
-      const activeMembers = (response.data.members || []).filter((member) => Number(member.is_active) !== 0);
-      setMembers(activeMembers);
-      setWitnessMemberId((current) => activeMembers.some((member) => String(member.id) === String(current)) ? current : activeMembers.length ? String(activeMembers[0].id) : "");
-    }).catch(() => {
-      if (isMounted) setMembers([]);
-    });
+    if (!groupId || !activeCycleId || !meetingId) {
+      setPresentWitnessMembers([]);
+      setWitnessMemberId("");
+      setWitnessListMessage("Select an open meeting and save its attendance register to choose a present witness.");
+      return () => { isMounted = false; };
+    }
+    setPresentWitnessMembers([]);
+    setWitnessMemberId("");
+    setWitnessListMessage("Loading members marked Present in this meeting…");
+    API.get(`/groups/${groupId}/meetings/${meetingId}/record`, { params: { cycleId: activeCycleId } })
+      .then((response) => {
+        if (!isMounted) return;
+        const present = (response.data?.record?.attendance || []).filter((row) => row.isActive && String(row.status).toUpperCase() === "PRESENT");
+        setPresentWitnessMembers(present);
+        setWitnessMemberId(present.length ? String(present[0].memberId) : "");
+        setWitnessListMessage(present.length ? "Witness must be one of the members marked Present in this meeting." : "No members are marked Present. Save the attendance register before reconciling cash.");
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setPresentWitnessMembers([]);
+        setWitnessMemberId("");
+        setWitnessListMessage(err.response?.data?.message || "Could not load attendance for the selected meeting.");
+      });
     return () => { isMounted = false; };
-  }, [loadReport, loadMeetings, groupId]);
+  }, [groupId, activeCycleId, meetingId, witnessRefreshToken]);
 
   const sendAction = async (path, body, successMessage, reset) => {
     setNotice({ type: "", text: "" });
@@ -131,8 +153,12 @@ export default function CashbookOperations({ user, activeCycleId }) {
 
   const submitReconciliation = (event) => {
     event.preventDefault();
-    if (!witnessMemberId) {
-      setNotice({ type: "error", text: "Select a group member as the witness before saving the cash count." });
+    if (!meetingId) {
+      setNotice({ type: "error", text: "Select an open meeting before recording a cash count. The witness must be present in that meeting." });
+      return;
+    }
+    if (!witnessMemberId || !presentWitnessMembers.some((member) => String(member.memberId) === String(witnessMemberId))) {
+      setNotice({ type: "error", text: "Select a member marked Present in this meeting as the witness before saving the cash count." });
       return;
     }
     void sendAction("reconcile", {
@@ -140,7 +166,7 @@ export default function CashbookOperations({ user, activeCycleId }) {
       countedCash: Number(countedCash),
       notes: reconcileNotes,
       witnessMemberId: Number(witnessMemberId),
-      ...(meetingId ? { meetingId: Number(meetingId) } : {}),
+      meetingId: Number(meetingId),
     }, "Cash count recorded.", () => { setCountedCash(""); setReconcileNotes(""); });
   };
 
@@ -206,7 +232,7 @@ export default function CashbookOperations({ user, activeCycleId }) {
           <h2 className="text-xl font-bold text-slate-900">Cashbook &amp; Cash Reconciliation</h2>
           <p className="text-sm text-slate-500 mt-1">Record actual cash movements. Loan Fund and Social Fund remain separate.</p>
         </div>
-        <button type="button" onClick={() => { void loadReport(); void loadMeetings(); }} disabled={loading} className="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-100 hover:bg-slate-200 disabled:opacity-50">
+        <button type="button" onClick={() => { void loadReport(); void loadMeetings(); setWitnessRefreshToken((value) => value + 1); }} disabled={loading} className="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-100 hover:bg-slate-200 disabled:opacity-50">
           {loading ? "Refreshing..." : "Refresh"}
         </button>
       </div>
@@ -274,9 +300,9 @@ export default function CashbookOperations({ user, activeCycleId }) {
           <p className="text-xs text-slate-500">Select the open meeting above, then count the actual cash separately for each fund. Both funds must match the cashbook and have no new entries after the count before that meeting can be closed.</p>
           <select value={reconcileFund} onChange={(e) => setReconcileFund(e.target.value)} className="w-full rounded-lg border px-3 py-2"><option value="LOAN_FUND">Loan Fund</option><option value="SOCIAL_FUND">Social Fund</option></select>
           <input type="number" required min="0" step="0.01" value={countedCash} onChange={(e) => setCountedCash(e.target.value)} placeholder="Physical cash counted (RWF)" className="w-full rounded-lg border px-3 py-2" />
-          <div><label className="block text-sm font-medium text-slate-700">Witness (group member, required)</label><select required value={witnessMemberId} onChange={(e) => setWitnessMemberId(e.target.value)} className="w-full rounded-lg border bg-white px-3 py-2"><option value="">Select a member to witness the cash count</option>{members.map((member) => <option key={member.id} value={member.id}>{member.full_name} ({member.phone_number})</option>)}</select></div>
+          <div><label className="block text-sm font-medium text-slate-700">Witness (must be Present in this meeting)</label><select required value={witnessMemberId} onChange={(e) => setWitnessMemberId(e.target.value)} disabled={!meetingId || presentWitnessMembers.length === 0} className="w-full rounded-lg border bg-white px-3 py-2 disabled:bg-slate-100"><option value="">Select a present member to witness the cash count</option>{presentWitnessMembers.map((member) => <option key={member.memberId} value={member.memberId}>{member.fullName} ({member.phoneNumber})</option>)}</select><p className="mt-1 text-xs text-slate-600">{witnessListMessage}</p></div>
           <input maxLength={500} value={reconcileNotes} onChange={(e) => setReconcileNotes(e.target.value)} placeholder="Optional notes about the count" className="w-full rounded-lg border px-3 py-2" />
-          <button className="w-full rounded-lg py-2 font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Save Cash Count</button>
+          <button disabled={!meetingId || !witnessMemberId || presentWitnessMembers.length === 0 || loading} className="w-full rounded-lg py-2 font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50">Save Cash Count</button>
         </form>
       </div>
 
@@ -285,15 +311,35 @@ export default function CashbookOperations({ user, activeCycleId }) {
           <h3 className="font-bold text-amber-950">Correct a Financial Entry (Reversal)</h3>
           <p className="mt-1 text-xs text-amber-900">Use this when a specific posted entry is wrong. The system appends an equal-and-opposite reversal linked to that entry, preserving the audit trail; then record the correct replacement through the normal form and count the cash again. Unlike a cash adjustment, a reversal explicitly cancels the effect of an identifiable existing entry. Loan disbursements and loan repayments require a loan-specific review and are not reversed here.</p>
         </div>
-        <select required value={reverseEntryId} onChange={(e) => setReverseEntryId(e.target.value)} disabled={!meetingId || !(report?.recentEntries || []).some((entry) => entry.correctionEligible)} className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2">
+        <select required value={reverseEntryId} onChange={(e) => setReverseEntryId(e.target.value)} disabled={!meetingId || !(report?.eligibleReversals || []).some((entry) => entry.correctionEligible)} className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2">
           <option value="">Choose entry to reverse</option>
-          {(report?.recentEntries || []).filter((entry) => entry.correctionEligible).map((entry) => (
-            <option key={entry.id} value={entry.id}>#{entry.id} · {entry.entryType.replaceAll("_", " ")} · {entry.direction} {MONEY(entry.amount)} · {new Date(entry.createdAt).toLocaleDateString()}</option>
-          ))}
+          {(report?.eligibleReversals || []).filter((entry) => entry.correctionEligible).map((entry) => {
+            const transactionType = String(entry.sourceTransactionType || "").toUpperCase();
+            const activity = transactionType === "SHARE_PURCHASE"
+              ? `Share purchase${entry.sourceTransactionSharesCount ? ` (${entry.sourceTransactionSharesCount} share(s))` : ""}`
+              : transactionType === "SOCIAL_FUND" ? "Social Fund contribution"
+              : transactionType === "FINE_PAYMENT" ? `Fine payment${entry.sourceTransactionFineReason ? `: ${entry.sourceTransactionFineReason}` : ""}`
+              : entry.entryType.replaceAll("_", " ");
+            const person = entry.memberName ? `Member: ${entry.memberName}` : "Group cashbook entry";
+            const note = entry.notes ? ` · ${entry.notes}` : "";
+            return <option key={entry.id} value={entry.id}>#{entry.id} · {person} · {activity} · {entry.direction} {MONEY(entry.amount)} · {new Date(entry.createdAt).toLocaleDateString()}{note}</option>;
+          })}
         </select>
+        {reverseEntryId && (() => {
+          const selected = (report?.eligibleReversals || []).find((entry) => String(entry.id) === String(reverseEntryId));
+          if (!selected) return null;
+          return <div className="rounded-lg border border-amber-200 bg-white p-3 text-sm space-y-1">
+            <p className="font-bold text-amber-950">Selected entry details</p>
+            <p><strong>Member:</strong> {selected.memberName || "Group-level cashbook entry"}</p>
+            <p><strong>Activity:</strong> {selected.sourceTransactionType === "SHARE_PURCHASE" ? `Share purchase (${selected.sourceTransactionSharesCount || 0} share(s))` : selected.sourceTransactionType === "SOCIAL_FUND" ? "Social Fund contribution" : selected.sourceTransactionType === "FINE_PAYMENT" ? `Fine payment${selected.sourceTransactionFineReason ? ` — ${selected.sourceTransactionFineReason}` : ""}` : selected.entryType.replaceAll("_", " ")}</p>
+            <p><strong>Amount and direction:</strong> {selected.direction} {MONEY(selected.amount)}</p>
+            <p><strong>Recorded:</strong> {new Date(selected.createdAt).toLocaleString()} by {selected.createdByName || "Unknown user"}</p>
+            <p><strong>Original note:</strong> {selected.notes || "No note was stored."}</p>
+          </div>;
+        })()}
         <textarea required minLength={5} maxLength={1000} value={reverseReason} onChange={(e) => setReverseReason(e.target.value)} placeholder="Why is this entry incorrect? Include the approved correction / meeting note." className="w-full min-h-20 rounded-lg border border-amber-300 bg-white px-3 py-2" />
         <button disabled={!meetingId || !reverseEntryId || reverseReason.trim().length < 5 || loading} className="rounded-lg px-4 py-2 font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:opacity-50">Reverse Selected Entry</button>
-        {report && !(report.recentEntries || []).some((entry) => entry.correctionEligible) && <p className="text-xs text-amber-900">No eligible entries appear in the latest 30 cashbook rows. Refresh, or choose an eligible contribution / non-loan cashbook entry.</p>}
+        {report && !(report.eligibleReversals || []).some((entry) => entry.correctionEligible) && <p className="text-xs text-amber-900">There are no unreversed eligible entries in this cycle. Entries linked to loan disbursements or repayments must be corrected through a loan-specific procedure.</p>}
       </form>
 
       {report && <div className="space-y-3">

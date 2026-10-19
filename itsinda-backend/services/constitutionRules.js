@@ -3,9 +3,15 @@ const DEFAULT_CONSTITUTION = Object.freeze({
   minSharesPerMeeting: 1,
   maxSharesPerMeeting: null,
   loanRatioLimit: 3,
-  monthlyInterestRate: 0.05,
-  interestMethod: "FLAT_PER_MONTH",
-  maxLoanDurationMonths: 12,
+  monthlyInterestRate: 0.05, // legacy alias; rate is now applied per configured day period
+  interestRate: 0.05,
+  interestMethod: "FLAT_PER_PERIOD",
+  interestPeriodDays: 30,
+  maxLoanTermDays: 30,
+  maxLoanDurationMonths: 1, // legacy alias for existing clients only
+  gusibuzaEnabled: false,
+  gusibuzaFeeMode: "PER_SHARE",
+  gusibuzaFeeAmount: 0,
   socialFundMode: "FLEXIBLE",
   socialFundContributionAmount: 0,
   fineRules: [],
@@ -17,9 +23,11 @@ const DEFAULT_CONSTITUTION = Object.freeze({
   defaultPolicy: "Document the group's approved procedure for late repayment, missed instalments, member contact, restructuring, and group-approved action for default.",
 });
 
-const INTEREST_METHODS = new Set(["FLAT_PER_MONTH", "FLAT_ONCE"]);
+const INTEREST_METHODS = new Set(["FLAT_PER_PERIOD", "FLAT_PER_MONTH", "FLAT_ONCE"]);
+const GUSIBUZA_FEE_MODES = new Set(["PER_SHARE", "PER_MEETING"]);
 const SOCIAL_FUND_MODES = new Set(["NONE", "FLEXIBLE", "FIXED"]);
 const MEETING_FREQUENCIES = new Set(["WEEKLY", "FORTNIGHTLY", "MONTHLY", "CUSTOM"]);
+const { isAutomaticAbsenceFineLabel } = require("./gusibuzaHelpers");
 
 function parseSettings(raw) {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
@@ -61,10 +69,24 @@ function normalizeConstitution(input = {}, base = {}) {
     }
   }
   terms.loanRatioLimit = finiteNumber(values.loanRatioLimit, "Loan-to-savings limit", { min: 0, minExclusive: true, max: 100 });
-  terms.monthlyInterestRate = finiteNumber(values.monthlyInterestRate, "Interest/service-charge rate", { min: 0, max: 1 });
-  terms.interestMethod = String(values.interestMethod || "FLAT_PER_MONTH").toUpperCase();
+  const legacyRate = values.monthlyInterestRate ?? DEFAULT_CONSTITUTION.monthlyInterestRate;
+  terms.interestRate = finiteNumber(values.interestRate ?? legacyRate, "Interest/service-charge rate", { min: 0, max: 1 });
+  terms.monthlyInterestRate = terms.interestRate; // keep existing modules compatible while the UI/API transition to days
+  const rawInterestMethod = String(values.interestMethod || "FLAT_PER_PERIOD").toUpperCase();
+  terms.interestMethod = rawInterestMethod === "FLAT_PER_MONTH" ? "FLAT_PER_PERIOD" : rawInterestMethod;
   if (!INTEREST_METHODS.has(terms.interestMethod)) throw new Error("Choose a supported interest calculation method.");
-  terms.maxLoanDurationMonths = finiteNumber(values.maxLoanDurationMonths, "Maximum loan duration", { min: 1, max: 60, integer: true });
+  const legacyDays = Number(values.maxLoanDurationMonths ?? DEFAULT_CONSTITUTION.maxLoanDurationMonths) * 30;
+  const periodDays = finiteNumber(values.interestPeriodDays ?? values.maxLoanTermDays ?? legacyDays, "Interest period / maximum loan term", { min: 1, max: 3660, integer: true });
+  terms.interestPeriodDays = periodDays;
+  terms.maxLoanTermDays = periodDays;
+  terms.maxLoanDurationMonths = Math.max(1, Math.ceil(periodDays / 30)); // legacy alias only
+
+  terms.gusibuzaEnabled = values.gusibuzaEnabled === true;
+  terms.gusibuzaFeeMode = String(values.gusibuzaFeeMode || "PER_SHARE").toUpperCase();
+  if (!GUSIBUZA_FEE_MODES.has(terms.gusibuzaFeeMode)) throw new Error("Choose whether gusibuza fees are charged per share or per missed meeting.");
+  terms.gusibuzaFeeAmount = finiteNumber(values.gusibuzaFeeAmount ?? 0, "Gusibuza fee", { min: 0, max: 100000000 });
+  if (terms.gusibuzaEnabled && (!Number.isSafeInteger(terms.maxSharesPerMeeting) || terms.maxSharesPerMeeting <= 0)) throw new Error("Gusibuza requires a positive, defined maximum shares per meeting.");
+  if (terms.gusibuzaEnabled && terms.gusibuzaFeeAmount <= 0) throw new Error("When gusibuza is enabled, its fee must be greater than zero.");
 
   terms.socialFundMode = String(values.socialFundMode || "FLEXIBLE").toUpperCase();
   if (!SOCIAL_FUND_MODES.has(terms.socialFundMode)) throw new Error("Choose a valid Social Fund contribution rule.");
@@ -106,15 +128,17 @@ function normalizeConstitution(input = {}, base = {}) {
   return terms;
 }
 
-function calculateInterestAmount(principalAmount, interestRate, durationMonths, interestMethod) {
+function calculateInterestAmount(principalAmount, interestRate, periods, interestMethod) {
   const principal = Number(principalAmount);
   const rate = Number(interestRate);
-  const duration = Number(durationMonths);
-  const method = String(interestMethod || "FLAT_PER_MONTH").toUpperCase();
-  if (!Number.isFinite(principal) || principal < 0 || !Number.isFinite(rate) || rate < 0 || !Number.isSafeInteger(duration) || duration < 1 || !INTEREST_METHODS.has(method)) {
+  const periodCount = Number(periods);
+  const rawMethod = String(interestMethod || "FLAT_PER_PERIOD").toUpperCase();
+  const method = rawMethod === "FLAT_PER_MONTH" ? "FLAT_PER_PERIOD" : rawMethod;
+  if (!Number.isFinite(principal) || principal < 0 || !Number.isFinite(rate) || rate < 0 || !Number.isSafeInteger(periodCount) || periodCount < 1 || !["FLAT_ONCE", "FLAT_PER_PERIOD"].includes(method)) {
     throw new Error("Cannot calculate interest from invalid loan terms.");
   }
-  const amount = principal * rate * (method === "FLAT_ONCE" ? 1 : duration);
+  // FLAT_PER_PERIOD is normally called once per completed period with the outstanding principal.
+  const amount = principal * rate * (method === "FLAT_ONCE" ? 1 : periodCount);
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
@@ -145,7 +169,11 @@ function validateMeetingContributions({
     return sum + count;
   }, 0);
   const hasContributionActivity = sharePurchases.length > 0 || socialFundTransactions.length > 0;
-  const requiresFixedSocialCheck = hasContributionActivity || Boolean(hasFineAssessment);
+  const hasMeetingActivity = hasContributionActivity || Boolean(hasFineAssessment) || fineTransactions.length > 0;
+  const requiresFixedSocialCheck = hasMeetingActivity;
+  if (hasMeetingActivity && String(attendanceStatus || "").toUpperCase() !== "PRESENT") {
+    throw new Error("Only members marked Present may record meeting contributions or manual fines. Absent-member fines are assessed automatically when the meeting closes.");
+  }
   if (hasContributionActivity && previousShares + requestedShares < minShares) {
     throw new Error(`The constitution requires at least ${minShares} share(s) per present member per meeting. This member has ${previousShares + requestedShares}.`);
   }
@@ -186,6 +214,9 @@ function validateMeetingContributions({
   const allowOtherFines = typeof terms.allowOtherFines === "boolean" ? terms.allowOtherFines : true;
   for (const fine of fineTransactions) {
     const reason = String(fine?.fineReason || "General fine").trim();
+    if (isAutomaticAbsenceFineLabel(reason)) {
+      throw new Error("Absence without excuse is assessed automatically when the meeting closes and cannot be entered manually.");
+    }
     const amount = Number(fine?.amount);
     if (!Number.isFinite(amount) || amount <= 0) throw new Error("Fine amount must be greater than zero.");
     const matchingRule = fineRules.find((rule) => String(rule?.label ?? rule?.name ?? "").trim().toLocaleLowerCase() === reason.toLocaleLowerCase());
@@ -207,6 +238,28 @@ function validateMeetingContributions({
     requestedSocialFund: requestedSocialAmount,
     totalSocialFundThisMeeting: priorSocialAmount + requestedSocialAmount,
   };
+}
+
+function validateMeetingAttendanceForClosure(attendanceRows = []) {
+  if (!Array.isArray(attendanceRows) || attendanceRows.length === 0) {
+    throw new Error("Record attendance for all active members before closing this meeting.");
+  }
+  const missing = [];
+  const excusedWithoutReason = [];
+  for (const row of attendanceRows) {
+    const name = String(row.full_name || row.fullName || `Member #${row.member_id ?? row.memberId ?? "?"}`);
+    const status = String(row.attendance_status || row.status || "NOT_RECORDED").toUpperCase();
+    const notes = String(row.attendance_notes ?? row.notes ?? "").trim();
+    if (!["PRESENT", "ABSENT", "EXCUSED"].includes(status)) missing.push(name);
+    if (status === "EXCUSED" && !notes) excusedWithoutReason.push(name);
+  }
+  if (missing.length || excusedWithoutReason.length) {
+    const problems = [];
+    if (missing.length) problems.push(`mark each active member Present, Absent, or Excused: ${missing.join(", ")}`);
+    if (excusedWithoutReason.length) problems.push(`record a reason for each excused member: ${excusedWithoutReason.join(", ")}`);
+    throw new Error(`Cannot close this meeting. Please ${problems.join("; ")}.`);
+  }
+  return { valid: true, membersChecked: attendanceRows.length };
 }
 
 function validateFixedSocialFundMeetingClosure(rawSettings, attendanceRows = []) {
@@ -273,6 +326,9 @@ function resolveFineAssessment(rawSettings, input = {}) {
     return { fineLabel: "Other", reason, amount: roundMoneyForRules(amount) };
   }
 
+  if (isAutomaticAbsenceFineLabel(selection)) {
+    throw new Error("Absence without excuse is assessed automatically when the meeting closes and cannot be selected manually.");
+  }
   const matchingRule = rules.find((rule) => String(rule?.label ?? rule?.name ?? "").trim().toLocaleLowerCase() === selection.toLocaleLowerCase());
   if (!matchingRule) throw new Error("The selected fine is not in the current approved constitution. Refresh the page and choose a defined rule.");
   const amount = Number(matchingRule.amount);
@@ -305,6 +361,13 @@ function getInitialConstitutionFromSettings(rawSettings) {
     ...settings,
     // Old group settings may store the rate under the legacy property. It is already a decimal fraction.
     monthlyInterestRate: settings.monthlyInterestRate ?? DEFAULT_CONSTITUTION.monthlyInterestRate,
+    interestRate: settings.interestRate ?? settings.monthlyInterestRate ?? DEFAULT_CONSTITUTION.monthlyInterestRate,
+    interestMethod: settings.interestMethod === "FLAT_PER_MONTH" ? "FLAT_PER_PERIOD" : (settings.interestMethod || "FLAT_PER_PERIOD"),
+    interestPeriodDays: settings.interestPeriodDays ?? settings.maxLoanTermDays ?? (Number(settings.maxLoanDurationMonths ?? 1) * 30),
+    maxLoanTermDays: settings.maxLoanTermDays ?? settings.interestPeriodDays ?? (Number(settings.maxLoanDurationMonths ?? 1) * 30),
+    gusibuzaEnabled: settings.gusibuzaEnabled === true,
+    gusibuzaFeeMode: settings.gusibuzaFeeMode ?? "PER_SHARE",
+    gusibuzaFeeAmount: settings.gusibuzaFeeAmount ?? 0,
     fineRules: Array.isArray(settings.fineRules) ? settings.fineRules : [],
     allowOtherFines: typeof settings.allowOtherFines === "boolean" ? settings.allowOtherFines : true,
     maxSharesPerMeeting: settings.maxSharesPerMeeting ?? null,
@@ -322,6 +385,7 @@ module.exports = {
   calculateInterestAmount,
   validateMeetingContributions,
   validateFixedSocialFundMeetingClosure,
+  validateMeetingAttendanceForClosure,
   resolveFineAssessment,
   getInitialConstitutionFromSettings,
 };

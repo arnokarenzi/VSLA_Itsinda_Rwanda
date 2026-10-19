@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { sendRouteError } = require("../utils/routeErrors");
 const { openMeeting, closeMeeting, recordMeetingTransactions } = require("../services/meetingService");
+const { listEligibleGusibuzaMeetings, recordGusibuza } = require("../services/gusibuzaService");
 const { verifyToken, requireRole, verifyGroupOwnership } = require("../middleware/auth");
 const db = require("../config/db");
 const auditMetaFor = (req) => ({ ipAddress: req.ip, userAgent: req.get("user-agent") });
@@ -35,6 +36,50 @@ router.get(
         nextMeetingNumber: Number(nextRows[0]?.next_meeting_number || 1) });
     } catch (error) {
       sendRouteError(res, error, { fallbackStatus: 500, fallbackMessage: "The server could not complete this request." });
+    }
+  },
+);
+
+
+// List earlier closed meetings that have room for late share purchases under the approved gusibuza rule.
+router.get(
+  "/groups/:groupId/gusibuza/eligible-meetings",
+  verifyToken,
+  verifyGroupOwnership,
+  requireRole(LEADERSHIP_ROLES),
+  async (req, res) => {
+    try {
+      const groupId = Number(req.params.groupId);
+      if (!req.user || Number(req.user.groupId) !== groupId) return res.status(403).json({ success: false, message: "Access forbidden. Group ID mismatch." });
+      const result = await listEligibleGusibuzaMeetings(groupId, req.query.cycleId, req.query.currentMeetingId, req.query.memberId);
+      return res.status(200).json({ success: true, ...result });
+    } catch (error) {
+      return sendRouteError(res, error, { fallbackStatus: 400, fallbackMessage: "Could not load eligible gusibuza meetings." });
+    }
+  },
+);
+
+// Record late shares and any required gusibuza fee in the current open meeting, credited to a prior meeting.
+router.post(
+  "/meetings/:meetingId/gusibuza",
+  verifyToken,
+  requireRole(LEADERSHIP_ROLES),
+  async (req, res) => {
+    try {
+      const meetingId = Number(req.params.meetingId);
+      const groupId = Number(req.body.groupId);
+      if (!Number.isSafeInteger(meetingId) || meetingId <= 0 || !Number.isSafeInteger(groupId) || groupId <= 0) {
+        return res.status(400).json({ success: false, message: "Valid current meeting and group IDs are required." });
+      }
+      if (!req.user || Number(req.user.groupId) !== groupId) return res.status(403).json({ success: false, message: "Access forbidden. Group ID mismatch." });
+      const result = await recordGusibuza({
+        groupId, cycleId: req.body.cycleId, currentMeetingId: meetingId,
+        memberId: req.body.memberId, targetMeetingId: req.body.targetMeetingId,
+        sharesCount: req.body.sharesCount, createdBy: req.user.id, auditMeta: auditMetaFor(req),
+      });
+      return res.status(201).json({ success: true, message: `Gusibuza recorded: ${result.sharesCount} share(s) credited to Meeting #${result.targetMeetingNumber}.`, gusibuza: result });
+    } catch (error) {
+      return sendRouteError(res, error, { fallbackStatus: 400, fallbackMessage: "Could not record gusibuza." });
     }
   },
 );
@@ -73,7 +118,12 @@ router.post(
         return res.status(403).json({ success: false, message: "Access forbidden. Group ID mismatch." });
       }
       const meeting = await closeMeeting(groupId, cycleId, meetingId, req.user.id, auditMetaFor(req));
-      res.status(200).json({ success: true, message: `Meeting #${meeting.meetingNumber} closed successfully.`, meeting });
+      const saved = meeting.persistedRecords || {};
+      res.status(200).json({
+        success: true,
+        message: `Meeting #${meeting.meetingNumber} closed and committed to the database. Saved record counts: ${saved.transactions ?? 0} transaction(s) including ${saved.loanRepayments ?? 0} loan repayment(s), ${saved.cashbookEntries ?? 0} cashbook entry/entries, ${saved.receipts ?? 0} receipt(s), ${saved.fineAssessments ?? 0} fine assessment(s), ${saved.loansDisbursed ?? 0} loan disbursement(s), ${saved.cashReconciliations ?? 0} cash reconciliation(s), ${saved.attendanceRows ?? 0} attendance row(s), and ${saved.meetingNotes ?? 0} meeting record(s).`,
+        meeting,
+      });
     } catch (error) {
       sendRouteError(res, error, { fallbackStatus: 400, fallbackMessage: "Failed to close the meeting." });
     }

@@ -6,7 +6,6 @@ const ATTENDANCE_OPTIONS = [
   { value: "PRESENT", label: "Present" },
   { value: "ABSENT", label: "Absent" },
   { value: "EXCUSED", label: "Excused" },
-  { value: "NOT_RECORDED", label: "Not marked" },
 ];
 
 export default function MeetingRecords({ user, activeCycleId }) {
@@ -57,7 +56,7 @@ export default function MeetingRecords({ user, activeCycleId }) {
         setActionItems(payload.notes.actionItems || "");
         setAttendance((payload.attendance || []).map((member) => ({
           memberId: member.memberId, fullName: member.fullName, phoneNumber: member.phoneNumber,
-          isActive: member.isActive, status: member.status || "NOT_RECORDED", notes: member.notes || "",
+          isActive: member.isActive, status: member.status === "NOT_RECORDED" ? "" : (member.status || ""), notes: member.notes || "",
         })));
       } catch (error) {
         if (active) setNotice({ type: "error", text: error.response?.data?.message || "Could not load the meeting record." });
@@ -74,6 +73,16 @@ export default function MeetingRecords({ user, activeCycleId }) {
   const saveRecord = async (event) => {
     event.preventDefault();
     if (!selectedMeetingId || record?.meeting?.status !== "OPEN") return;
+    const unmarked = attendance.filter((row) => row.isActive && !["PRESENT", "ABSENT", "EXCUSED"].includes(String(row.status).toUpperCase()));
+    if (unmarked.length) {
+      setNotice({ type: "error", text: `Choose Present, Absent, or Excused for every active member. Not marked: ${unmarked.map((row) => row.fullName).join(", ")}.` });
+      return;
+    }
+    const excusedWithoutReason = attendance.filter((row) => row.isActive && String(row.status).toUpperCase() === "EXCUSED" && !String(row.notes || "").trim());
+    if (excusedWithoutReason.length) {
+      setNotice({ type: "error", text: `Enter a reason for every excused member: ${excusedWithoutReason.map((row) => row.fullName).join(", ")}.` });
+      return;
+    }
     setSaving(true);
     setNotice({ type: "", text: "" });
     try {
@@ -136,7 +145,7 @@ export default function MeetingRecords({ user, activeCycleId }) {
               <div className="space-y-3">
                 <div>
                   <h3 className="font-bold text-slate-900">Attendance register</h3>
-                  <p className="text-xs text-slate-500 mt-1">Mark each member present, absent or excused. Leave as “Not marked” until verified.</p>
+                  <p className="text-xs text-slate-500 mt-1">Choose exactly one status for every active member: Present, Absent or Excused. An Excused status requires a reason.</p>
                 </div>
                 <div className="overflow-x-auto rounded-xl border border-slate-200">
                   <table className="w-full min-w-[650px] text-left text-sm">
@@ -144,8 +153,8 @@ export default function MeetingRecords({ user, activeCycleId }) {
                     <tbody className="divide-y divide-slate-100">
                       {attendance.map((row) => <tr key={row.memberId} className={!row.isActive ? "opacity-60" : ""}>
                         <td className="px-3 py-3"><div className="font-medium">{row.fullName}</div><div className="text-xs text-slate-500">{row.phoneNumber}{!row.isActive ? " · Inactive" : ""}</div></td>
-                        <td className="px-3 py-3"><select value={row.status} onChange={(event) => updateAttendance(row.memberId, "status", event.target.value)} disabled={!editable} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 disabled:bg-slate-50">{ATTENDANCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></td>
-                        <td className="px-3 py-3"><input value={row.notes} onChange={(event) => updateAttendance(row.memberId, "notes", event.target.value)} disabled={!editable} maxLength={500} placeholder="Optional note" className="w-full rounded-lg border border-slate-300 px-2 py-1.5 disabled:bg-slate-50" /></td>
+                        <td className="px-3 py-3"><select value={row.status} onChange={(event) => updateAttendance(row.memberId, "status", event.target.value)} disabled={!editable} required={row.isActive} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 disabled:bg-slate-50"><option value="">Choose status</option>{ATTENDANCE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></td>
+                        <td className="px-3 py-3"><input value={row.notes} onChange={(event) => updateAttendance(row.memberId, "notes", event.target.value)} disabled={!editable} maxLength={500} placeholder={row.status === "EXCUSED" ? "Required reason for excusal" : "Optional note"} required={row.isActive && row.status === "EXCUSED"} className="w-full rounded-lg border border-slate-300 px-2 py-1.5 disabled:bg-slate-50" /></td>
                       </tr>)}
                     </tbody>
                   </table>

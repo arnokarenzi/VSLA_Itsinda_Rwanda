@@ -2,7 +2,8 @@ const db = require("../config/db");
 const { insertLedgerEntry } = require("./fundLedgerService");
 const { createReceipt } = require("./receiptService");
 const { writeAuditEvent } = require("./auditService");
-const { validateMeetingContributions, validateFixedSocialFundMeetingClosure, resolveFineAssessment, parseSettings } = require("./constitutionRules");
+const { validateMeetingContributions, validateFixedSocialFundMeetingClosure, validateMeetingAttendanceForClosure, resolveFineAssessment, parseSettings } = require("./constitutionRules");
+const { findAutomaticAbsenceFineRule, isAutomaticAbsenceFineLabel } = require("./gusibuzaHelpers");
 
 async function openMeeting(groupId, cycleId, meetingNumber, date, createdBy, auditMeta = {}) {
   const parsedGroupId = Number(groupId);
@@ -68,7 +69,7 @@ async function requireCurrentBalancedCashCount(connection, groupId, cycleId, mee
   );
   const lastEntryId = ledgerRows[0]?.last_entry_id == null ? null : Number(ledgerRows[0].last_entry_id);
   const [reconciliations] = await connection.query(
-    `SELECT variance, ledger_entry_id_at_count, meeting_id FROM cash_reconciliations
+    `SELECT variance, ledger_entry_id_at_count, meeting_id, witness_member_id FROM cash_reconciliations
      WHERE group_id = ? AND cycle_id = ? AND fund_type = ?
      ORDER BY id DESC LIMIT 1 FOR UPDATE`,
     [groupId, cycleId, fundType],
@@ -79,6 +80,18 @@ async function requireCurrentBalancedCashCount(connection, groupId, cycleId, mee
   const reconciliation = reconciliations[0];
   if (reconciliation.meeting_id == null || Number(reconciliation.meeting_id) !== meetingId) {
     throw new Error(`Record the ${label} physical cash count while this meeting is selected in Cashbook & Reconciliation before closing the meeting.`);
+  }
+  if (!reconciliation.witness_member_id) {
+    throw new Error(`${label} count has no recorded witness. Record a new count with a member marked Present in this meeting.`);
+  }
+  const [witnessAttendanceRows] = await connection.query(
+    `SELECT 1 FROM meeting_attendance
+     WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND member_id = ? AND attendance_status = 'PRESENT'
+     LIMIT 1 FOR UPDATE`,
+    [groupId, cycleId, meetingId, Number(reconciliation.witness_member_id)],
+  );
+  if (!witnessAttendanceRows.length) {
+    throw new Error(`${label} witness is not marked Present in this meeting's attendance register. Choose a present witness and record the cash count again.`);
   }
   const countEntryId = reconciliation.ledger_entry_id_at_count == null ? null : Number(reconciliation.ledger_entry_id_at_count);
   if (countEntryId !== lastEntryId) {
@@ -113,22 +126,96 @@ async function closeMeeting(groupId, cycleId, meetingId, createdBy, auditMeta = 
     const [groupRows] = await connection.query("SELECT settings FROM `groups` WHERE id = ? LIMIT 1", [parsedGroupId]);
     if (!groupRows.length) throw new Error("Group not found.");
     const groupSettings = parseSettings(groupRows[0].settings);
-    if (String(groupSettings.socialFundMode || "FLEXIBLE").toUpperCase() === "FIXED") {
-      const [memberAttendanceRows] = await connection.query(
-        `SELECT u.id AS member_id, u.full_name, COALESCE(ma.attendance_status, 'NOT_RECORDED') AS attendance_status,
-            COALESCE(SUM(CASE WHEN t.type = 'SOCIAL_FUND' AND t.status = 'POSTED' THEN t.amount ELSE 0 END), 0) AS social_fund_paid
-         FROM users u
-         LEFT JOIN meeting_attendance ma ON ma.group_id = u.group_id AND ma.cycle_id = ? AND ma.meeting_id = ? AND ma.member_id = u.id
-         LEFT JOIN transactions t ON t.group_id = u.group_id AND t.cycle_id = ? AND t.meeting_id = ? AND t.member_id = u.id
-         WHERE u.group_id = ? AND u.is_active = 1
-         GROUP BY u.id, u.full_name, ma.attendance_status
-         ORDER BY u.full_name ASC`,
-        [parsedCycleId, parsedMeetingId, parsedCycleId, parsedMeetingId, parsedGroupId],
+    const [memberAttendanceRows] = await connection.query(
+      `SELECT u.id AS member_id, u.full_name,
+          COALESCE(ma.attendance_status, 'NOT_RECORDED') AS attendance_status,
+          COALESCE(ma.notes, '') AS attendance_notes,
+          COALESCE(SUM(CASE WHEN t.type = 'SOCIAL_FUND' AND t.status = 'POSTED' THEN t.amount ELSE 0 END), 0) AS social_fund_paid
+       FROM users u
+       LEFT JOIN meeting_attendance ma ON ma.group_id = u.group_id AND ma.cycle_id = ? AND ma.meeting_id = ? AND ma.member_id = u.id
+       LEFT JOIN transactions t ON t.group_id = u.group_id AND t.cycle_id = ? AND t.meeting_id = ? AND t.member_id = u.id
+       WHERE u.group_id = ? AND COALESCE(u.is_active, 1) = 1
+       GROUP BY u.id, u.full_name, ma.attendance_status, ma.notes
+       ORDER BY u.full_name ASC`,
+      [parsedCycleId, parsedMeetingId, parsedCycleId, parsedMeetingId, parsedGroupId],
+    );
+    validateMeetingAttendanceForClosure(memberAttendanceRows);
+    validateFixedSocialFundMeetingClosure(groupSettings, memberAttendanceRows);
+
+    // Assess the constitution-defined absence fine automatically at close. This is a debt
+    // assessment only; it does not create a cash ledger entry until the fine is paid.
+    const absentMembers = memberAttendanceRows.filter((row) => String(row.attendance_status).toUpperCase() === "ABSENT");
+    if (absentMembers.length) {
+      const absenceRule = findAutomaticAbsenceFineRule(groupSettings.fineRules);
+      const absenceFineAmount = Number(absenceRule?.amount);
+      if (!absenceRule || !Number.isFinite(absenceFineAmount) || absenceFineAmount <= 0) {
+        throw new Error('The group has absent members but no valid "Absence without excuse" fine is defined in the approved constitution. Add this rule before closing the meeting.');
+      }
+      const [existingAutoFineRows] = await connection.query(
+        `SELECT member_id, fine_label FROM fine_assessments
+         WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND status <> 'REVERSED'`,
+        [parsedGroupId, parsedCycleId, parsedMeetingId],
       );
-      validateFixedSocialFundMeetingClosure(groupSettings, memberAttendanceRows);
+      const alreadyAssessed = new Set(existingAutoFineRows
+        .filter((row) => isAutomaticAbsenceFineLabel(row.fine_label))
+        .map((row) => Number(row.member_id)));
+      for (const absent of absentMembers) {
+        if (alreadyAssessed.has(Number(absent.member_id))) continue;
+        const [fineResult] = await connection.query(
+          `INSERT INTO fine_assessments
+            (group_id, cycle_id, meeting_id, member_id, fine_label, reason, amount, amount_paid, status, assessed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'OUTSTANDING', ?)`,
+          [parsedGroupId, parsedCycleId, parsedMeetingId, Number(absent.member_id),
+            String(absenceRule.label || absenceRule.name).trim(), "Absent without excuse", Math.round((absenceFineAmount + Number.EPSILON) * 100) / 100, createdBy],
+        );
+        await writeAuditEvent(connection, {
+          groupId: parsedGroupId, cycleId: parsedCycleId, meetingId: parsedMeetingId,
+          actorUserId: createdBy, action: "ABSENCE_FINE_ASSESSED_ON_MEETING_CLOSE", entityType: "FINE_ASSESSMENT", entityId: fineResult.insertId,
+          afterData: { memberId: Number(absent.member_id), fineLabel: String(absenceRule.label || absenceRule.name).trim(), reason: "Absent without excuse", amount: Math.round((absenceFineAmount + Number.EPSILON) * 100) / 100, amountPaid: 0, status: "OUTSTANDING" },
+          reason: "Automatically assessed because the member was marked Absent in the saved attendance register.", ...auditMeta,
+        });
+      }
     }
     await requireCurrentBalancedCashCount(connection, parsedGroupId, parsedCycleId, parsedMeetingId, "LOAN_FUND");
     await requireCurrentBalancedCashCount(connection, parsedGroupId, parsedCycleId, parsedMeetingId, "SOCIAL_FUND");
+
+    // Read back the persisted meeting records inside the same transaction. The counts
+    // are stored in the close audit event and returned after commit as a save receipt.
+    const [persistedRows] = await connection.query(
+      `SELECT
+        (SELECT COUNT(*) FROM transactions WHERE group_id = ? AND cycle_id = ? AND meeting_id = ?) AS transaction_count,
+        (SELECT COUNT(*) FROM fund_ledger_entries WHERE group_id = ? AND cycle_id = ? AND meeting_id = ?) AS ledger_entry_count,
+        (SELECT COUNT(*) FROM financial_receipts WHERE group_id = ? AND cycle_id = ? AND meeting_id = ?) AS receipt_count,
+        (SELECT COUNT(*) FROM fine_assessments WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND status <> 'REVERSED') AS fine_assessment_count,
+        (SELECT COUNT(*) FROM meeting_attendance WHERE group_id = ? AND cycle_id = ? AND meeting_id = ?) AS attendance_count,
+        (SELECT COUNT(*) FROM meeting_records WHERE group_id = ? AND cycle_id = ? AND meeting_id = ?) AS meeting_record_count,
+        (SELECT COUNT(*) FROM cash_reconciliations WHERE group_id = ? AND cycle_id = ? AND meeting_id = ?) AS cash_reconciliation_count,
+        (SELECT COUNT(DISTINCT loan_id) FROM fund_ledger_entries WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND entry_type = 'LOAN_DISBURSEMENT' AND loan_id IS NOT NULL) AS loan_disbursement_count,
+        (SELECT COUNT(*) FROM transactions WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND type = 'LOAN_REPAYMENT' AND status = 'POSTED') AS loan_repayment_count`,
+      [parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId,
+        parsedGroupId, parsedCycleId, parsedMeetingId],
+    );
+    const persistedRecords = {
+      transactions: Number(persistedRows[0].transaction_count || 0),
+      cashbookEntries: Number(persistedRows[0].ledger_entry_count || 0),
+      receipts: Number(persistedRows[0].receipt_count || 0),
+      fineAssessments: Number(persistedRows[0].fine_assessment_count || 0),
+      attendanceRows: Number(persistedRows[0].attendance_count || 0),
+      meetingNotes: Number(persistedRows[0].meeting_record_count || 0),
+      cashReconciliations: Number(persistedRows[0].cash_reconciliation_count || 0),
+      loansDisbursed: Number(persistedRows[0].loan_disbursement_count || 0),
+      loanRepayments: Number(persistedRows[0].loan_repayment_count || 0),
+    };
+    if (persistedRecords.meetingNotes < 1) {
+      throw new Error("Save the meeting notes and attendance register before closing. Nothing was closed; the meeting remains open.");
+    }
     await connection.query(
       `UPDATE meetings SET status = 'CLOSED' WHERE id = ? AND group_id = ? AND cycle_id = ? AND status = 'OPEN'`,
       [parsedMeetingId, parsedGroupId, parsedCycleId],
@@ -137,11 +224,11 @@ async function closeMeeting(groupId, cycleId, meetingId, createdBy, auditMeta = 
       groupId: parsedGroupId, cycleId: parsedCycleId, meetingId: parsedMeetingId,
       actorUserId: createdBy, action: "MEETING_CLOSED", entityType: "MEETING", entityId: parsedMeetingId,
       beforeData: { meetingNumber: Number(meetingRows[0].meeting_number), status: "OPEN" },
-      afterData: { meetingNumber: Number(meetingRows[0].meeting_number), status: "CLOSED" }, ...auditMeta,
+      afterData: { meetingNumber: Number(meetingRows[0].meeting_number), status: "CLOSED", persistedRecords }, ...auditMeta,
     });
     await connection.commit();
     return { id: parsedMeetingId, groupId: parsedGroupId, cycleId: parsedCycleId,
-      meetingNumber: Number(meetingRows[0].meeting_number), status: "CLOSED" };
+      meetingNumber: Number(meetingRows[0].meeting_number), status: "CLOSED", persistedRecords };
   } catch (error) {
     await connection.rollback().catch(() => {});
     throw error;
@@ -203,7 +290,7 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
     if (sharePurchases.length || socialFundTransactions.length) {
       const [meetingShareRows] = await connection.query(
         `SELECT COALESCE(SUM(shares_count), 0) AS shares_count
-         FROM transactions WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND member_id = ?
+         FROM transactions WHERE group_id = ? AND cycle_id = ? AND COALESCE(credited_meeting_id, meeting_id) = ? AND member_id = ?
            AND type = 'SHARE_PURCHASE' AND status = 'POSTED'`,
         [parsedGroupId, parsedCycleId, parsedMeetingId, parsedMemberId],
       );
@@ -219,14 +306,17 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
       socialFundAlreadyPaidThisMeeting = Number(socialRows[0]?.amount || 0);
     }
     let attendanceStatus = null;
-    const hasContributionActivity = sharePurchases.length > 0 || socialFundTransactions.length > 0 || transactionsData.length > 0 || Boolean(fineAssessment);
-    if (String(settings?.socialFundMode || "FLEXIBLE").toUpperCase() === "FIXED" && hasContributionActivity) {
+    const hasContributionActivity = transactionsData.length > 0 || Boolean(fineAssessment);
+    if (hasContributionActivity) {
       const [attendanceRows] = await connection.query(
         `SELECT attendance_status FROM meeting_attendance
          WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND member_id = ? LIMIT 1 FOR UPDATE`,
         [parsedGroupId, parsedCycleId, parsedMeetingId, parsedMemberId],
       );
-      attendanceStatus = attendanceRows[0]?.attendance_status || null;
+      attendanceStatus = String(attendanceRows[0]?.attendance_status || "").toUpperCase();
+      if (attendanceStatus !== "PRESENT") {
+        throw new Error("Only members marked Present may be selected for Meeting Operations & Contributions. Absent fines are assessed automatically when the meeting closes; excused members are exempt.");
+      }
     }
 
     validateMeetingContributions({

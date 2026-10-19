@@ -257,12 +257,16 @@ router.post(
       connection = await db.getConnection();
       await connection.beginTransaction();
       await lockActiveCycle(connection, groupId, cycleId);
-      const meetingId = await validateOpenMeeting(connection, req.body.meetingId, groupId, cycleId, { required: false });
+      const meetingId = await validateOpenMeeting(connection, req.body.meetingId, groupId, cycleId);
       const [witnessRows] = await connection.query(
-        "SELECT id FROM users WHERE id = ? AND group_id = ? AND is_active = 1 LIMIT 1 FOR UPDATE",
-        [witnessMemberId, groupId],
+        `SELECT u.id, u.full_name FROM users u
+         JOIN meeting_attendance ma ON ma.member_id = u.id AND ma.group_id = u.group_id
+         WHERE u.id = ? AND u.group_id = ? AND u.is_active = 1
+           AND ma.cycle_id = ? AND ma.meeting_id = ? AND ma.attendance_status = 'PRESENT'
+         LIMIT 1 FOR UPDATE`,
+        [witnessMemberId, groupId, cycleId, meetingId],
       );
-      if (!witnessRows.length) throw new Error("Choose an active member of this group as the cash-count witness.");
+      if (!witnessRows.length) throw new Error("The cash-count witness must be an active group member marked Present in this open meeting's attendance register.");
       const bookBalance = await getBookBalance(connection, groupId, cycleId, fundType);
       const lastEntryId = await getLastLedgerEntryId(connection, groupId, cycleId, fundType);
       const variance = roundMoney(countedCash - bookBalance);
@@ -284,7 +288,7 @@ router.post(
         message: Math.abs(variance) < 0.01
           ? "Cash count matches the cashbook."
           : `Cash count saved with a variance of ${variance.toLocaleString()} RWF. Investigate the difference; it has not been automatically adjusted.`,
-        reconciliation: { fundType, bookBalance, countedCash, variance, witnessMemberId, balanced: Math.abs(variance) < 0.01 },
+        reconciliation: { fundType, bookBalance, countedCash, variance, meetingId, witnessMemberId, witnessMemberName: witnessRows[0].full_name, balanced: Math.abs(variance) < 0.01 },
       });
     } catch (error) {
       if (connection) await connection.rollback().catch(() => {});

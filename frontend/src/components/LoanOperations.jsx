@@ -21,8 +21,6 @@ export default function LoanOperations({
   const [selectedMeetingId, setSelectedMeetingId] = useState("");
 
   const [principalAmount, setPrincipalAmount] = useState("");
-  const [durationMonths, setDurationMonths] = useState(3);
-  const [dueDate, setDueDate] = useState("");
   const [selectedLoanId, setSelectedLoanId] = useState("");
   const [repaymentAmount, setRepaymentAmount] = useState("");
   const [message, setMessage] = useState({ type: "", text: "" });
@@ -31,8 +29,10 @@ export default function LoanOperations({
   const [constitutionTerms, setConstitutionTerms] = useState({
     loanRatioLimit: 3,
     monthlyInterestRate: 0.05,
-    interestMethod: "FLAT_PER_MONTH",
-    maxLoanDurationMonths: 12,
+    interestRate: 0.05,
+    interestMethod: "FLAT_PER_PERIOD",
+    interestPeriodDays: 30,
+    maxLoanTermDays: 30,
   });
 
   const fetchOpenMeetings = useCallback(async () => {
@@ -123,30 +123,19 @@ export default function LoanOperations({
   useEffect(() => {
     let isCurrentRequest = true;
 
-    const clearOutstandingLoanState = () => {
-      setMemberLoans([]);
-      setMemberFines([]);
-      setSelectedLoanId("");
-    };
-
     if (
       !Number.isSafeInteger(groupId) || groupId <= 0 ||
       !Number.isSafeInteger(Number(activeCycleId)) || Number(activeCycleId) <= 0 ||
       !Number.isSafeInteger(Number(repaymentMemberId)) || Number(repaymentMemberId) <= 0
     ) {
-      queueMicrotask(() => {
-        if (isCurrentRequest) {
-          clearOutstandingLoanState();
-          setLoadingMemberLoans(false);
-        }
-      });
       return () => { isCurrentRequest = false; };
     }
 
     const fetchOutstandingLoans = async () => {
       setLoadingMemberLoans(true);
-      clearOutstandingLoanState();
-
+      setMemberLoans([]);
+      setMemberFines([]);
+      setSelectedLoanId("");
       try {
         const response = await API.get(`/groups/${groupId}/loans/outstanding`, {
           params: { cycleId: Number(activeCycleId), memberId: Number(repaymentMemberId) },
@@ -159,7 +148,6 @@ export default function LoanOperations({
         if (isCurrentRequest) {
           setMemberLoans([]);
           setMemberFines([]);
-          setSelectedLoanId("");
           setMessage({
             type: "error",
             text: err.response?.data?.message || "Could not load this borrower's outstanding loans.",
@@ -181,16 +169,14 @@ export default function LoanOperations({
         const response = await API.get(`/groups/${groupId}/constitution`);
         const terms = response.data?.constitution?.current?.terms;
         if (isMounted && terms) {
-          const nextTerms = {
+          const periodDays = Number(terms.interestPeriodDays ?? terms.maxLoanTermDays ?? (Number(terms.maxLoanDurationMonths ?? 1) * 30));
+          setConstitutionTerms({
             loanRatioLimit: Number(terms.loanRatioLimit ?? 3),
-            monthlyInterestRate: Number(terms.monthlyInterestRate ?? 0.05),
-            interestMethod: terms.interestMethod || "FLAT_PER_MONTH",
-            maxLoanDurationMonths: Number(terms.maxLoanDurationMonths ?? 12),
-          };
-          setConstitutionTerms(nextTerms);
-          setDurationMonths((current) =>
-            Math.min(Number(current) || 1, nextTerms.maxLoanDurationMonths),
-          );
+            monthlyInterestRate: Number(terms.interestRate ?? terms.monthlyInterestRate ?? 0.05),
+            interestMethod: terms.interestMethod === "FLAT_PER_MONTH" ? "FLAT_PER_PERIOD" : (terms.interestMethod || "FLAT_PER_PERIOD"),
+            interestPeriodDays: periodDays,
+            maxLoanTermDays: Number(terms.maxLoanTermDays ?? periodDays),
+          });
         }
       } catch {
         // The backend remains authoritative. Keep backward-compatible UI defaults if the rules cannot load.
@@ -234,18 +220,12 @@ export default function LoanOperations({
         meetingId: Number(selectedMeetingId),
         memberId: Number(selectedMemberId),
         principalAmount: Number(principalAmount),
-        durationMonths: Number(durationMonths),
-        dueDate:
-          dueDate ||
-          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-            .toISOString()
-            .split("T")[0],
       });
       if (res.data.success) {
         const loan = res.data.loan;
         setMessage({
           type: "success",
-          text: `Loan #${loan.loanId} issued. ${Number(loan.principalAmount).toLocaleString()} RWF left the loan fund; expected interest is ${Number(loan.totalInterestDue).toLocaleString()} RWF. ${loan.receipt?.receiptNumber ? `Receipt: ${loan.receipt.receiptNumber}. Open Meeting Records & Receipts to print it.` : ""}`,
+          text: `Loan #${loan.loanId} issued. ${Number(loan.principalAmount).toLocaleString()} RWF left the Loan Fund. ${loan.interestMethod === "FLAT_ONCE" ? `One-time service charge: ${Number(loan.totalInterestDue).toLocaleString()} RWF.` : `Interest accrues at ${(Number(loan.interestRate) * 100).toLocaleString()}% per completed ${loan.interestPeriodDays}-day period on outstanding principal.`} Expected date: ${String(loan.dueDate).slice(0, 10)}. ${loan.receipt?.receiptNumber ? `Receipt: ${loan.receipt.receiptNumber}. Open Meeting Records & Receipts to print it.` : ""}`,
         });
         setPrincipalAmount("");
         if (onLoanProcessed) onLoanProcessed();
@@ -352,9 +332,8 @@ export default function LoanOperations({
           {(constitutionTerms.monthlyInterestRate * 100).toLocaleString()}%{" "}
           {constitutionTerms.interestMethod === "FLAT_ONCE"
             ? "once per loan"
-            : "per month (flat)"}
-          . Maximum term: {constitutionTerms.maxLoanDurationMonths} month(s).
-          The server enforces the current rules when the loan is submitted.
+            : `per completed ${constitutionTerms.interestPeriodDays}-day period on outstanding principal`}
+          . Maximum initial term: {constitutionTerms.maxLoanTermDays} days. A partial repayment reduces principal before future periods are charged; early/late settlement follows the approved group rules.
         </p>
         <p className="text-xs text-slate-500">
           For all approved group rules, open{" "}
@@ -461,33 +440,8 @@ export default function LoanOperations({
               className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg"
             />
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                Duration (Months)
-              </label>
-              <input
-                type="number"
-                required
-                min="1"
-                max={constitutionTerms.maxLoanDurationMonths}
-                value={durationMonths}
-                onChange={(e) => setDurationMonths(e.target.value)}
-                className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                Due Date
-              </label>
-              <input
-                type="date"
-                required
-                value={dueDate}
-                onChange={(e) => setDueDate(e.target.value)}
-                className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg"
-              />
-            </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
+            <strong>Loan term is set by the constitution:</strong> {constitutionTerms.maxLoanTermDays} days. The expected due date is calculated automatically. Borrowers do not enter their own duration or due date. For periodic rules, interest is charged for completed periods based on the principal still outstanding.
           </div>
           <button
             type="submit"
@@ -569,7 +523,8 @@ export default function LoanOperations({
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900 space-y-1">
               <p className="font-semibold">Selected Loan #{selectedRepaymentLoan.loanId}</p>
               <p>Original principal: {Number(selectedRepaymentLoan.principalAmount).toLocaleString()} RWF</p>
-              <p>Total interest/service charge due at issuance: {Number(selectedRepaymentLoan.totalInterestDue).toLocaleString()} RWF</p>
+              <p>Total interest/service charge due to date: {Number(selectedRepaymentLoan.totalInterestDue).toLocaleString()} RWF</p>
+              {selectedRepaymentLoan.interestMethod === "LEGACY_FIXED" ? <p className="text-xs">Principal/interest split is unavailable for this historical loan; the total outstanding balance below remains authoritative.</p> : <p>Principal remaining: {Number(selectedRepaymentLoan.principalBalanceRemaining ?? selectedRepaymentLoan.balanceRemaining).toLocaleString()} RWF</p>}
               <p className="font-semibold">Current outstanding balance: {Number(selectedRepaymentLoan.balanceRemaining).toLocaleString()} RWF</p>
               <p>Due date: {String(selectedRepaymentLoan.dueDate).slice(0, 10)}</p>
             </div>
@@ -600,7 +555,7 @@ export default function LoanOperations({
             />
           </div>
           <p className="text-xs text-gray-500">
-            Select one of this borrower's outstanding loans or fines. Loan repayments are applied to interest first, then principal. Fine payments reduce only the selected fine balance. Payments above the selected balance are rejected.
+            Select one of this borrower's outstanding loans or fines. Accrued interest/service charge is settled first, then the payment reduces principal. Future periodic charges use the principal remaining after partial payments. Fine payments reduce only the selected fine balance. Payments above the selected balance are rejected.
           </p>
           <button
             type="submit"

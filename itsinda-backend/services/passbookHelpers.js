@@ -14,6 +14,7 @@ function activityForEntry(entryType, transactionType = null) {
   const txType = String(transactionType || "").toUpperCase();
   if (type.startsWith("SHARE_PURCHASE") || txType === "SHARE_PURCHASE") return "SAVINGS";
   if (type.startsWith("FINE_PAYMENT") || txType === "FINE_PAYMENT") return "FINE";
+  if (type === "GUSIBUZA_FEE" || txType === "GUSIBUZA_FEE") return "GUSIBUZA_FEE";
   if (type.startsWith("SOCIAL_FUND_CONTRIBUTION") || txType === "SOCIAL_FUND") return "SOCIAL_FUND";
   if (type === "LOAN_DISBURSEMENT" || txType === "LOAN_DISBURSEMENT") return "LOAN_DISBURSEMENT";
   if (type === "LOAN_PRINCIPAL_REPAYMENT" || type === "LOAN_INTEREST_REPAYMENT" || txType === "LOAN_REPAYMENT") return "LOAN_REPAYMENT";
@@ -28,6 +29,7 @@ function entryLabel(category, entryType, transactionType, isReversal = false) {
       SAVINGS: "Share purchase correction",
       FINE: "Fine payment correction",
       SOCIAL_FUND: "Social Fund contribution correction",
+      GUSIBUZA_FEE: "Gusibuza fee correction",
       LOAN_DISBURSEMENT: "Loan disbursement correction",
       LOAN_REPAYMENT: "Loan repayment correction",
     }[originalCategory] || "Financial correction";
@@ -37,6 +39,7 @@ function entryLabel(category, entryType, transactionType, isReversal = false) {
   const labels = {
     SHARE_PURCHASE: "Savings / share purchase",
     FINE_PAYMENT: "Fine paid",
+    GUSIBUZA_FEE: "Gusibuza / late-share fee",
     SOCIAL_FUND: "Social Fund contribution",
     LOAN_DISBURSEMENT: "Loan disbursed",
     LOAN_REPAYMENT: "Loan repayment",
