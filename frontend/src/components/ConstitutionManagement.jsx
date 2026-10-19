@@ -248,7 +248,7 @@ export default function ConstitutionManagement({ user }) {
             <form onSubmit={handleProposal} className="space-y-6">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 <Field label="Price per share (RWF)"><input className={inputClass} type="number" min="1" step="0.01" required value={form.shareValue} onChange={(e) => updateForm("shareValue", e.target.value)} /></Field>
-                <Field label="Minimum shares per member per meeting"><input className={inputClass} type="number" min="1" step="1" required value={form.minSharesPerMeeting} onChange={(e) => updateForm("minSharesPerMeeting", e.target.value)} /></Field>
+                <Field label="Minimum shares per member per meeting"><input className={inputClass} type="number" min="0" step="1" required value={form.minSharesPerMeeting} onChange={(e) => updateForm("minSharesPerMeeting", e.target.value)} /></Field>
                 <Field label="Maximum shares per member per meeting" help="Leave blank for no configured maximum."><input className={inputClass} type="number" min="1" step="1" value={form.maxSharesPerMeeting} onChange={(e) => updateForm("maxSharesPerMeeting", e.target.value)} /></Field>
                 <Field label="Loan limit (multiple of savings)"><input className={inputClass} type="number" min="0.1" max="100" step="0.1" required value={form.loanRatioLimit} onChange={(e) => updateForm("loanRatioLimit", e.target.value)} /></Field>
                 <Field label="Interest/service charge (%)" help="Enter 5 for 5%, not 0.05."><input className={inputClass} type="number" min="0" max="100" step="0.01" required value={form.monthlyInterestPercent} onChange={(e) => updateForm("monthlyInterestPercent", e.target.value)} /></Field>

@@ -253,10 +253,16 @@ router.post(
       if (req.body.countedCash === "" || req.body.countedCash == null) throw new Error("Counted cash is required; enter 0 only if the fund has no physical cash.");
       const countedCash = parseAmount(req.body.countedCash, "Counted cash", { allowZero: true });
       const notes = validateNotes(req.body.notes, { optional: true });
+      const witnessMemberId = parsePositiveId(req.body.witnessMemberId, "Witness member ID");
       connection = await db.getConnection();
       await connection.beginTransaction();
       await lockActiveCycle(connection, groupId, cycleId);
       const meetingId = await validateOpenMeeting(connection, req.body.meetingId, groupId, cycleId, { required: false });
+      const [witnessRows] = await connection.query(
+        "SELECT id FROM users WHERE id = ? AND group_id = ? AND is_active = 1 LIMIT 1 FOR UPDATE",
+        [witnessMemberId, groupId],
+      );
+      if (!witnessRows.length) throw new Error("Choose an active member of this group as the cash-count witness.");
       const bookBalance = await getBookBalance(connection, groupId, cycleId, fundType);
       const lastEntryId = await getLastLedgerEntryId(connection, groupId, cycleId, fundType);
       const variance = roundMoney(countedCash - bookBalance);
@@ -264,13 +270,13 @@ router.post(
       const [reconciliationResult] = await connection.query(
         `INSERT INTO cash_reconciliations
           (group_id, cycle_id, meeting_id, fund_type, book_balance_at_count, counted_cash,
-           variance, ledger_entry_id_at_count, notes, reconciled_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [groupId, cycleId, meetingId, fundType, bookBalance, countedCash, variance, lastEntryId, notes, req.user.id],
+           variance, ledger_entry_id_at_count, notes, reconciled_by, witness_member_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [groupId, cycleId, meetingId, fundType, bookBalance, countedCash, variance, lastEntryId, notes, req.user.id, witnessMemberId],
       );
       await writeAuditEvent(connection, {
         groupId, cycleId, meetingId, actorUserId: req.user.id, action: "PHYSICAL_CASH_COUNT_RECORDED", entityType: "CASH_RECONCILIATION",
-        entityId: reconciliationResult.insertId, afterData: { fundType, bookBalance, countedCash, variance, lastEntryId, notes }, ...auditMetaFor(req),
+        entityId: reconciliationResult.insertId, afterData: { fundType, bookBalance, countedCash, variance, lastEntryId, notes, witnessMemberId }, ...auditMetaFor(req),
       });
       await connection.commit();
       res.status(201).json({
@@ -278,7 +284,7 @@ router.post(
         message: Math.abs(variance) < 0.01
           ? "Cash count matches the cashbook."
           : `Cash count saved with a variance of ${variance.toLocaleString()} RWF. Investigate the difference; it has not been automatically adjusted.`,
-        reconciliation: { fundType, bookBalance, countedCash, variance, balanced: Math.abs(variance) < 0.01 },
+        reconciliation: { fundType, bookBalance, countedCash, variance, witnessMemberId, balanced: Math.abs(variance) < 0.01 },
       });
     } catch (error) {
       if (connection) await connection.rollback().catch(() => {});

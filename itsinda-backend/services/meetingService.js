@@ -2,7 +2,7 @@ const db = require("../config/db");
 const { insertLedgerEntry } = require("./fundLedgerService");
 const { createReceipt } = require("./receiptService");
 const { writeAuditEvent } = require("./auditService");
-const { validateMeetingContributions } = require("./constitutionRules");
+const { validateMeetingContributions, validateFixedSocialFundMeetingClosure, resolveFineAssessment, parseSettings } = require("./constitutionRules");
 
 async function openMeeting(groupId, cycleId, meetingNumber, date, createdBy, auditMeta = {}) {
   const parsedGroupId = Number(groupId);
@@ -110,6 +110,23 @@ async function closeMeeting(groupId, cycleId, meetingId, createdBy, auditMeta = 
       [parsedMeetingId, parsedGroupId, parsedCycleId],
     );
     if (!meetingRows.length) throw new Error("This meeting is not open for the selected group and cycle.");
+    const [groupRows] = await connection.query("SELECT settings FROM `groups` WHERE id = ? LIMIT 1", [parsedGroupId]);
+    if (!groupRows.length) throw new Error("Group not found.");
+    const groupSettings = parseSettings(groupRows[0].settings);
+    if (String(groupSettings.socialFundMode || "FLEXIBLE").toUpperCase() === "FIXED") {
+      const [memberAttendanceRows] = await connection.query(
+        `SELECT u.id AS member_id, u.full_name, COALESCE(ma.attendance_status, 'NOT_RECORDED') AS attendance_status,
+            COALESCE(SUM(CASE WHEN t.type = 'SOCIAL_FUND' AND t.status = 'POSTED' THEN t.amount ELSE 0 END), 0) AS social_fund_paid
+         FROM users u
+         LEFT JOIN meeting_attendance ma ON ma.group_id = u.group_id AND ma.cycle_id = ? AND ma.meeting_id = ? AND ma.member_id = u.id
+         LEFT JOIN transactions t ON t.group_id = u.group_id AND t.cycle_id = ? AND t.meeting_id = ? AND t.member_id = u.id
+         WHERE u.group_id = ? AND u.is_active = 1
+         GROUP BY u.id, u.full_name, ma.attendance_status
+         ORDER BY u.full_name ASC`,
+        [parsedCycleId, parsedMeetingId, parsedCycleId, parsedMeetingId, parsedGroupId],
+      );
+      validateFixedSocialFundMeetingClosure(groupSettings, memberAttendanceRows);
+    }
     await requireCurrentBalancedCashCount(connection, parsedGroupId, parsedCycleId, parsedMeetingId, "LOAN_FUND");
     await requireCurrentBalancedCashCount(connection, parsedGroupId, parsedCycleId, parsedMeetingId, "SOCIAL_FUND");
     await connection.query(
@@ -135,7 +152,7 @@ async function closeMeeting(groupId, cycleId, meetingId, createdBy, auditMeta = 
 
 
 /** Record share purchases, fines and social-fund contributions atomically in both records and cashbook. */
-async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, transactionsData, createdBy, auditMeta = {}) {
+async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, transactionsData, createdBy, auditMeta = {}, fineAssessment = null) {
   const parsedGroupId = Number(groupId);
   const parsedCycleId = Number(cycleId);
   const parsedMeetingId = Number(meetingId);
@@ -144,8 +161,8 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
   if (![parsedGroupId, parsedCycleId, parsedMeetingId, parsedMemberId, parsedCreatedBy].every((value) => Number.isSafeInteger(value) && value > 0)) {
     throw new Error("Group, cycle, meeting, member and recording-user IDs must be valid positive integers.");
   }
-  if (!Array.isArray(transactionsData) || transactionsData.length === 0) {
-    throw new Error("At least one transaction is required.");
+  if (!Array.isArray(transactionsData) || (transactionsData.length === 0 && !fineAssessment)) {
+    throw new Error("Record a contribution or select a fine rule before submitting.");
   }
 
   const connection = await db.getConnection();
@@ -183,7 +200,7 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
     const fineTransactions = transactionsData.filter((tx) => String(tx?.type || "").toUpperCase() === "FINE_PAYMENT");
     let sharesAlreadyPurchasedThisMeeting = 0;
     let socialFundAlreadyPaidThisMeeting = 0;
-    if (sharePurchases.length) {
+    if (sharePurchases.length || socialFundTransactions.length) {
       const [meetingShareRows] = await connection.query(
         `SELECT COALESCE(SUM(shares_count), 0) AS shares_count
          FROM transactions WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND member_id = ?
@@ -192,7 +209,7 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
       );
       sharesAlreadyPurchasedThisMeeting = Number(meetingShareRows[0]?.shares_count || 0);
     }
-    if (socialFundTransactions.length) {
+    if (socialFundTransactions.length || (String(settings?.socialFundMode || "FLEXIBLE").toUpperCase() === "FIXED" && (sharePurchases.length > 0 || transactionsData.length > 0 || Boolean(fineAssessment)))) {
       const [socialRows] = await connection.query(
         `SELECT COALESCE(SUM(amount), 0) AS amount
          FROM transactions WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND member_id = ?
@@ -201,6 +218,17 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
       );
       socialFundAlreadyPaidThisMeeting = Number(socialRows[0]?.amount || 0);
     }
+    let attendanceStatus = null;
+    const hasContributionActivity = sharePurchases.length > 0 || socialFundTransactions.length > 0 || transactionsData.length > 0 || Boolean(fineAssessment);
+    if (String(settings?.socialFundMode || "FLEXIBLE").toUpperCase() === "FIXED" && hasContributionActivity) {
+      const [attendanceRows] = await connection.query(
+        `SELECT attendance_status FROM meeting_attendance
+         WHERE group_id = ? AND cycle_id = ? AND meeting_id = ? AND member_id = ? LIMIT 1 FOR UPDATE`,
+        [parsedGroupId, parsedCycleId, parsedMeetingId, parsedMemberId],
+      );
+      attendanceStatus = attendanceRows[0]?.attendance_status || null;
+    }
+
     validateMeetingContributions({
       terms: settings,
       existingSharesThisMeeting: sharesAlreadyPurchasedThisMeeting,
@@ -208,13 +236,16 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
       existingSocialFundAmount: socialFundAlreadyPaidThisMeeting,
       socialFundTransactions,
       fineTransactions,
+      attendanceStatus,
+      hasFineAssessment: Boolean(fineAssessment),
     });
 
+    const resolvedFine = fineAssessment ? resolveFineAssessment(settings, fineAssessment) : null;
     const recordedTransactions = [];
     for (const tx of transactionsData) {
       const type = String(tx?.type || "").toUpperCase();
-      if (!["SHARE_PURCHASE", "FINE_PAYMENT", "SOCIAL_FUND"].includes(type)) {
-        throw new Error(`Transaction type ${type || "(empty)"} is not allowed through meeting contributions.`);
+      if (!["SHARE_PURCHASE", "SOCIAL_FUND"].includes(type)) {
+        throw new Error(`Transaction type ${type || "(empty)"} is not allowed through member contributions. Fine penalties are assessed as outstanding fines and paid through the fine repayment workflow.`);
       }
       const amount = Number(tx.amount);
       if (!Number.isFinite(amount) || amount <= 0) throw new Error(`${type} amount must be greater than zero.`);
@@ -278,8 +309,35 @@ async function recordMeetingTransactions(groupId, cycleId, meetingId, memberId, 
       recordedTransactions.push({ transactionId: result.insertId, ledgerEntryId, type, amount: safeAmount, sharesCount, fineReason, receipt });
     }
 
+    let savedFineAssessment = null;
+    if (resolvedFine) {
+      const [fineResult] = await connection.query(
+        `INSERT INTO fine_assessments
+          (group_id, cycle_id, meeting_id, member_id, fine_label, reason, amount, amount_paid, status, assessed_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'OUTSTANDING', ?)`,
+        [parsedGroupId, parsedCycleId, parsedMeetingId, parsedMemberId, resolvedFine.fineLabel, resolvedFine.reason, resolvedFine.amount, parsedCreatedBy],
+      );
+      savedFineAssessment = {
+        fineId: Number(fineResult.insertId),
+        memberId: parsedMemberId,
+        fineLabel: resolvedFine.fineLabel,
+        reason: resolvedFine.reason,
+        amount: resolvedFine.amount,
+        amountPaid: 0,
+        balanceRemaining: resolvedFine.amount,
+        status: "OUTSTANDING",
+      };
+      await writeAuditEvent(connection, {
+        groupId: parsedGroupId, cycleId: parsedCycleId, meetingId: parsedMeetingId,
+        actorUserId: parsedCreatedBy, action: "FINE_ASSESSED", entityType: "FINE_ASSESSMENT", entityId: fineResult.insertId,
+        afterData: savedFineAssessment,
+        reason: `Fine assessed: ${resolvedFine.fineLabel}${resolvedFine.reason !== resolvedFine.fineLabel ? ` — ${resolvedFine.reason}` : ""}`,
+        ...auditMeta,
+      });
+    }
+
     await connection.commit();
-    return recordedTransactions;
+    return { transactions: recordedTransactions, fineAssessment: savedFineAssessment };
   } catch (error) {
     await connection.rollback().catch(() => {});
     throw new Error(`Transaction failed: ${error.message}`);

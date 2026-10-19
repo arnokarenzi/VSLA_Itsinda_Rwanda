@@ -113,6 +113,9 @@ async function calculateShareOut(groupId, cycleId) {
     if (cashbook.outstandingLoans.count > 0) {
       blockingReasons.push(`${cashbook.outstandingLoans.count} loan(s) still have ${cashbook.outstandingLoans.balance.toLocaleString()} RWF outstanding. Settle or formally resolve every outstanding loan before distribution.`);
     }
+    if (cashbook.outstandingFines?.count > 0) {
+      blockingReasons.push(`${cashbook.outstandingFines.count} fine assessment(s) still have ${cashbook.outstandingFines.balance.toLocaleString()} RWF outstanding. Collect or formally resolve these fines before final distribution.`);
+    }
     if (!loanFund.latestReconciliation) {
       blockingReasons.push("The loan fund has not been physically counted and reconciled yet.");
     } else if (!loanFund.reconciliationCurrent) {

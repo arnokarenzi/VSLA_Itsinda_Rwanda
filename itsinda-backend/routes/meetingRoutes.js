@@ -90,7 +90,7 @@ router.post(
       const groupId = Number(req.body.groupId);
       const cycleId = Number(req.body.cycleId);
       const memberId = Number(req.body.memberId);
-      const { transactions } = req.body;
+      const { transactions, fineAssessment = null } = req.body;
 
       if (!Number.isSafeInteger(meetingId) || meetingId <= 0) {
         return res.status(400).json({ success: false, message: "A valid numeric meeting ID is required. Please open a meeting session again." });
@@ -99,13 +99,18 @@ router.post(
         return res.status(403).json({ success: false, message: "Access forbidden. Group ID mismatch." });
       }
       if (!Array.isArray(transactions)) {
-        return res.status(400).json({ success: false, message: "Transactions array is required." });
+        return res.status(400).json({ success: false, message: "Transactions must be supplied as a list, even when recording a fine only." });
       }
 
-      const savedTransactions = await recordMeetingTransactions(
-        groupId, cycleId, meetingId, memberId, transactions, req.user.id, auditMetaFor(req),
+      const result = await recordMeetingTransactions(
+        groupId, cycleId, meetingId, memberId, transactions, req.user.id, auditMetaFor(req), fineAssessment,
       );
-      res.status(201).json({ success: true, message: "Transactions recorded successfully", transactions: savedTransactions });
+      res.status(201).json({
+        success: true,
+        message: result.fineAssessment ? "Member contributions recorded and the fine was added to outstanding fines." : "Transactions recorded successfully",
+        transactions: result.transactions,
+        fineAssessment: result.fineAssessment,
+      });
     } catch (error) {
       sendRouteError(res, error, { fallbackStatus: 400, fallbackMessage: "The request could not be completed." });
     }

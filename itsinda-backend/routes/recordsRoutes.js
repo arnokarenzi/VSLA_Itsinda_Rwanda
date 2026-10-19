@@ -144,7 +144,7 @@ router.post("/groups/:groupId/cycles/:cycleId/cashbook/reversals", verifyToken, 
 
     const [entryRows] = await connection.query(
       `SELECT e.*, t.type AS transaction_type, t.amount AS transaction_amount, t.status AS transaction_status,
-          t.fine_reason, t.shares_count, t.member_id AS transaction_member_id
+          t.fine_reason, t.shares_count, t.member_id AS transaction_member_id, t.fine_assessment_id
        FROM fund_ledger_entries e
        LEFT JOIN transactions t ON e.source_type = 'TRANSACTION' AND e.source_id = t.id
        WHERE e.id = ? AND e.group_id = ? AND e.cycle_id = ? FOR UPDATE`,
@@ -158,7 +158,7 @@ router.post("/groups/:groupId/cycles/:cycleId/cashbook/reversals", verifyToken, 
 
     let transaction = null;
     if (original.source_type === "TRANSACTION") {
-      transaction = { type: original.transaction_type, status: original.transaction_status };
+      transaction = { type: original.transaction_type, status: original.transaction_status, fineAssessmentId: original.fine_assessment_id == null ? null : Number(original.fine_assessment_id) };
       if (!transaction.type) throw new Error("The source transaction could not be found; ask an administrator to inspect the ledger.");
       if (!["SHARE_PURCHASE", "FINE_PAYMENT", "SOCIAL_FUND"].includes(transaction.type) || original.source_component !== "TOTAL") {
         throw new Error("This transaction is tied to a loan disbursement or repayment and cannot be reversed through the general correction form. Use a loan-specific correction procedure.");
@@ -194,6 +194,21 @@ router.post("/groups/:groupId/cycles/:cycleId/cashbook/reversals", verifyToken, 
           `UPDATE cycles SET total_fines_collected = GREATEST(0, COALESCE(total_fines_collected, 0) - ?)
            WHERE id = ? AND group_id = ?`, [amount, cycleId, groupId],
         );
+        if (transaction.fineAssessmentId) {
+          const [assessmentRows] = await connection.query(
+            "SELECT amount, amount_paid FROM fine_assessments WHERE id = ? AND group_id = ? AND cycle_id = ? FOR UPDATE",
+            [transaction.fineAssessmentId, groupId, cycleId],
+          );
+          if (!assessmentRows.length) throw new Error("The linked fine assessment is missing; the reversal was not completed.");
+          const assessed = Number(assessmentRows[0].amount);
+          const paidAfterReversal = Math.max(0, Math.round((Number(assessmentRows[0].amount_paid) - amount + Number.EPSILON) * 100) / 100);
+          const remainingAfterReversal = Math.max(0, Math.round((assessed - paidAfterReversal + Number.EPSILON) * 100) / 100);
+          const fineStatus = paidAfterReversal < 0.01 ? "OUTSTANDING" : remainingAfterReversal < 0.01 ? "PAID" : "PARTIALLY_PAID";
+          await connection.query(
+            "UPDATE fine_assessments SET amount_paid = ?, status = ? WHERE id = ?",
+            [paidAfterReversal, fineStatus, transaction.fineAssessmentId],
+          );
+        }
       }
     }
     const receipt = await createReceipt(connection, {

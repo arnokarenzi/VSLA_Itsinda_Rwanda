@@ -51,11 +51,11 @@ function normalizeConstitution(input = {}, base = {}) {
   const terms = {};
 
   terms.shareValue = finiteNumber(values.shareValue, "Share value", { min: 0, minExclusive: true, max: 100000000 });
-  terms.minSharesPerMeeting = finiteNumber(values.minSharesPerMeeting, "Minimum shares per member per meeting", { min: 1, max: 10000, integer: true });
+  terms.minSharesPerMeeting = finiteNumber(values.minSharesPerMeeting, "Minimum shares per member per meeting", { min: 0, max: 10000, integer: true });
   if (values.maxSharesPerMeeting == null || values.maxSharesPerMeeting === "") {
     terms.maxSharesPerMeeting = null;
   } else {
-    terms.maxSharesPerMeeting = finiteNumber(values.maxSharesPerMeeting, "Maximum shares per member per meeting", { min: 1, max: 10000, integer: true });
+    terms.maxSharesPerMeeting = finiteNumber(values.maxSharesPerMeeting, "Maximum shares per member per meeting", { min: 0, max: 10000, integer: true });
     if (terms.maxSharesPerMeeting < terms.minSharesPerMeeting) {
       throw new Error("Maximum shares per meeting cannot be less than the minimum shares per meeting.");
     }
@@ -118,6 +118,10 @@ function calculateInterestAmount(principalAmount, interestRate, durationMonths, 
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
+function roundMoneyForRules(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
 function validateMeetingContributions({
   terms: rawTerms = {},
   existingSharesThisMeeting = 0,
@@ -125,21 +129,25 @@ function validateMeetingContributions({
   existingSocialFundAmount = 0,
   socialFundTransactions = [],
   fineTransactions = [],
+  attendanceStatus = null,
+  hasFineAssessment = false,
 } = {}) {
   const terms = { ...DEFAULT_CONSTITUTION, ...rawTerms };
   const minShares = Number(terms.minSharesPerMeeting ?? 1);
   const maxShares = terms.maxSharesPerMeeting == null || terms.maxSharesPerMeeting === "" ? null : Number(terms.maxSharesPerMeeting);
   const previousShares = Number(existingSharesThisMeeting || 0);
-  if (!Number.isSafeInteger(minShares) || minShares < 1) throw new Error("The group's minimum-shares rule is invalid. Review its constitution.");
+  if (!Number.isSafeInteger(minShares) || minShares < 0) throw new Error("The group's minimum-shares rule is invalid. Review its constitution.");
   if (!Number.isFinite(previousShares) || previousShares < 0) throw new Error("Existing meeting share totals are invalid.");
-  if (maxShares !== null && (!Number.isSafeInteger(maxShares) || maxShares < minShares)) throw new Error("The group's maximum-shares rule is invalid. Review its constitution.");
+  if (maxShares !== null && (!Number.isSafeInteger(maxShares) || maxShares < minShares || maxShares < 0)) throw new Error("The group's maximum-shares rule is invalid. Review its constitution.");
   const requestedShares = sharePurchases.reduce((sum, item) => {
     const count = Number(item?.sharesCount);
     if (!Number.isSafeInteger(count) || count <= 0) throw new Error("Shares purchased must be a positive whole number.");
     return sum + count;
   }, 0);
-  if (requestedShares > 0 && previousShares + requestedShares < minShares) {
-    throw new Error(`The constitution requires at least ${minShares} share(s) per member per meeting when purchasing shares.`);
+  const hasContributionActivity = sharePurchases.length > 0 || socialFundTransactions.length > 0;
+  const requiresFixedSocialCheck = hasContributionActivity || Boolean(hasFineAssessment);
+  if (hasContributionActivity && previousShares + requestedShares < minShares) {
+    throw new Error(`The constitution requires at least ${minShares} share(s) per present member per meeting. This member has ${previousShares + requestedShares}.`);
   }
   if (maxShares !== null && previousShares + requestedShares > maxShares) {
     throw new Error(`This member would exceed the constitution's limit of ${maxShares} share(s) in this meeting. Already recorded: ${previousShares}.`);
@@ -156,8 +164,22 @@ function validateMeetingContributions({
     return sum + amount;
   }, 0);
   if (requestedSocialAmount > 0 && socialMode === "NONE") throw new Error("The current group constitution does not allow Social Fund contributions.");
-  if (requestedSocialAmount > 0 && socialMode === "FIXED" && priorSocialAmount + requestedSocialAmount > fixedSocialAmount + 0.009) {
-    throw new Error(`The constitution sets the Social Fund contribution at ${fixedSocialAmount.toLocaleString()} RWF per member per meeting. Already recorded: ${priorSocialAmount.toLocaleString()} RWF.`);
+  if (socialMode === "FIXED" && requiresFixedSocialCheck) {
+    const status = String(attendanceStatus || "").toUpperCase();
+    if (!["PRESENT", "ABSENT", "EXCUSED"].includes(status)) {
+      throw new Error("Record this member's attendance as Present or Absent in Meeting Records before recording contributions under the fixed Social Fund rule.");
+    }
+    if (status === "ABSENT" || status === "EXCUSED") {
+      if (requestedSocialAmount > 0) {
+        throw new Error("Members marked absent or excused are exempt from the fixed Social Fund contribution for this meeting.");
+      }
+    } else {
+      const totalAfterSubmission = roundMoneyForRules(priorSocialAmount + requestedSocialAmount);
+      if (Math.abs(totalAfterSubmission - fixedSocialAmount) > 0.009) {
+        const due = Math.max(0, roundMoneyForRules(fixedSocialAmount - priorSocialAmount));
+        throw new Error(`This member is marked Present and must contribute exactly ${fixedSocialAmount.toLocaleString()} RWF to the Social Fund for this meeting. Already recorded: ${priorSocialAmount.toLocaleString()} RWF; still required: ${due.toLocaleString()} RWF. Less or more is not allowed.`);
+      }
+    }
   }
 
   const fineRules = Array.isArray(terms.fineRules) ? terms.fineRules : [];
@@ -184,6 +206,81 @@ function validateMeetingContributions({
     totalSharesThisMeeting: previousShares + requestedShares,
     requestedSocialFund: requestedSocialAmount,
     totalSocialFundThisMeeting: priorSocialAmount + requestedSocialAmount,
+  };
+}
+
+function validateFixedSocialFundMeetingClosure(rawSettings, attendanceRows = []) {
+  const settings = parseSettings(rawSettings);
+  const socialMode = String(settings.socialFundMode || "FLEXIBLE").toUpperCase();
+  if (socialMode !== "FIXED") return { enforced: false, presentMembers: 0 };
+
+  const requiredAmount = Number(settings.socialFundContributionAmount);
+  if (!Number.isFinite(requiredAmount) || requiredAmount <= 0) {
+    throw new Error("The group's fixed Social Fund amount is invalid. Review the constitution before closing this meeting.");
+  }
+  if (!Array.isArray(attendanceRows) || attendanceRows.length === 0) {
+    throw new Error("Record attendance for the group's active members before closing this meeting under the fixed Social Fund rule.");
+  }
+
+  const missingAttendance = [];
+  const unpaidPresent = [];
+  const paymentsForAbsent = [];
+  let presentMembers = 0;
+  for (const row of attendanceRows) {
+    const name = String(row.full_name || row.fullName || `Member #${row.member_id ?? row.memberId ?? "?"}`);
+    const status = String(row.attendance_status || row.status || "NOT_RECORDED").toUpperCase();
+    const paid = roundMoneyForRules(row.social_fund_paid ?? row.socialFundPaid ?? 0);
+    if (!["PRESENT", "ABSENT", "EXCUSED"].includes(status)) {
+      missingAttendance.push(name);
+      continue;
+    }
+    if (status === "PRESENT") {
+      presentMembers += 1;
+      if (Math.abs(paid - requiredAmount) > 0.009) {
+        const due = roundMoneyForRules(requiredAmount - paid);
+        unpaidPresent.push(`${name} (${paid.toLocaleString()} RWF paid${due > 0 ? `; ${due.toLocaleString()} RWF short` : `; ${Math.abs(due).toLocaleString()} RWF over`})`);
+      }
+    } else if (paid > 0.009) {
+      paymentsForAbsent.push(`${name} (${paid.toLocaleString()} RWF recorded while marked ${status.toLowerCase()})`);
+    }
+  }
+
+  if (missingAttendance.length || unpaidPresent.length || paymentsForAbsent.length) {
+    const problems = [];
+    if (missingAttendance.length) problems.push(`attendance must be marked Present, Absent, or Excused for: ${missingAttendance.join(", ")}`);
+    if (unpaidPresent.length) problems.push(`every present member must pay exactly ${requiredAmount.toLocaleString()} RWF Social Fund: ${unpaidPresent.join("; ")}`);
+    if (paymentsForAbsent.length) problems.push(`review Social Fund payments for members marked absent/excused: ${paymentsForAbsent.join("; ")}`);
+    throw new Error(`Cannot close this meeting. Under the fixed Social Fund rule, ${problems.join(". ")}.`);
+  }
+
+  return { enforced: true, presentMembers, requiredAmount };
+}
+
+function resolveFineAssessment(rawSettings, input = {}) {
+  const settings = parseSettings(rawSettings);
+  const rules = Array.isArray(settings.fineRules) ? settings.fineRules : [];
+  const allowOtherFines = settings.allowOtherFines !== false;
+  const selection = String(input.ruleLabel || input.fineRule || "").trim();
+  if (!selection) throw new Error("Select a fine rule before recording a fine.");
+
+  if (selection.toUpperCase() === "OTHER") {
+    if (!allowOtherFines) throw new Error("The group's constitution does not allow fines outside the approved list.");
+    const reason = String(input.otherReason || input.reason || "").trim();
+    if (reason.length < 3) throw new Error("Enter a reason of at least 3 characters for the other fine.");
+    if (reason.length > 255) throw new Error("Fine reason cannot exceed 255 characters.");
+    const amount = Number(input.otherAmount ?? input.amount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) throw new Error("Enter a valid positive amount for the other fine.");
+    return { fineLabel: "Other", reason, amount: roundMoneyForRules(amount) };
+  }
+
+  const matchingRule = rules.find((rule) => String(rule?.label ?? rule?.name ?? "").trim().toLocaleLowerCase() === selection.toLocaleLowerCase());
+  if (!matchingRule) throw new Error("The selected fine is not in the current approved constitution. Refresh the page and choose a defined rule.");
+  const amount = Number(matchingRule.amount);
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error(`The configured amount for fine "${selection}" is invalid. Review the constitution.`);
+  return {
+    fineLabel: String(matchingRule.label ?? matchingRule.name).trim().slice(0, 100),
+    reason: String(matchingRule.label ?? matchingRule.name).trim().slice(0, 255),
+    amount: roundMoneyForRules(amount),
   };
 }
 
@@ -224,5 +321,7 @@ module.exports = {
   evaluateVoteOutcome,
   calculateInterestAmount,
   validateMeetingContributions,
+  validateFixedSocialFundMeetingClosure,
+  resolveFineAssessment,
   getInitialConstitutionFromSettings,
 };

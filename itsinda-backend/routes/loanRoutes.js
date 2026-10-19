@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { sendRouteError } = require("../utils/routeErrors");
 const { issueLoan, repayLoan, getOutstandingLoans } = require("../services/loanService");
+const { getOutstandingFines } = require("../services/fineService");
 const { verifyToken, requireRole, verifyGroupOwnership } = require("../middleware/auth");
 const auditMetaFor = (req) => ({ ipAddress: req.ip, userAgent: req.get("user-agent") });
 
@@ -18,7 +19,8 @@ router.get(
       const { groupId } = req.params;
       const { cycleId, memberId } = req.query;
       const loans = await getOutstandingLoans(groupId, cycleId, memberId);
-      return res.status(200).json({ success: true, loans });
+      const fines = await getOutstandingFines(groupId, cycleId, memberId);
+      return res.status(200).json({ success: true, loans, fines });
     } catch (error) {
       return sendRouteError(res, error, {
         fallbackStatus: 400,

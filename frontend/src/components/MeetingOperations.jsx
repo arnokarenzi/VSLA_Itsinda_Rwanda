@@ -24,9 +24,18 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [sharesCount, setSharesCount] = useState(0);
   const [shareValue, setShareValue] = useState(1000);
-  const [socialFundAmount, setSocialFundAmount] = useState(0);
-  const [fineAmount, setFineAmount] = useState(0);
-  const [fineReason, setFineReason] = useState("");
+  const [socialFundAmount, setSocialFundAmount] = useState("");
+  const [fineRuleSelection, setFineRuleSelection] = useState("");
+  const [otherFineReason, setOtherFineReason] = useState("");
+  const [otherFineAmount, setOtherFineAmount] = useState("");
+  const [selectedMemberAttendance, setSelectedMemberAttendance] = useState("NOT_RECORDED");
+  const [groupRules, setGroupRules] = useState({
+    minSharesPerMeeting: 1,
+    socialFundMode: "FLEXIBLE",
+    socialFundContributionAmount: 0,
+    fineRules: [],
+    allowOtherFines: true,
+  });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState({ type: "", text: "" });
 
@@ -81,6 +90,13 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
             try { settings = JSON.parse(settings); } catch { settings = {}; }
           }
           if (Number.isFinite(Number(settings.shareValue)) && Number(settings.shareValue) > 0) setShareValue(Number(settings.shareValue));
+          setGroupRules({
+            minSharesPerMeeting: Number.isSafeInteger(Number(settings.minSharesPerMeeting)) && Number(settings.minSharesPerMeeting) >= 0 ? Number(settings.minSharesPerMeeting) : 1,
+            socialFundMode: String(settings.socialFundMode || "FLEXIBLE").toUpperCase(),
+            socialFundContributionAmount: Number(settings.socialFundContributionAmount || 0),
+            fineRules: Array.isArray(settings.fineRules) ? settings.fineRules : [],
+            allowOtherFines: settings.allowOtherFines !== false,
+          });
         }
       } catch {
         if (isMounted) setMessage({ type: "error", text: "Failed to load group members or settings." });
@@ -100,6 +116,26 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
     const requestId = schedule(() => { void loadOpenMeetings({ quiet: true }); });
     return () => cancel(requestId);
   }, [loadOpenMeetings]);
+
+  useEffect(() => {
+    let current = true;
+    if (!activeMeeting?.id || !activeCycleId || !selectedMemberId) {
+      setSelectedMemberAttendance("NOT_RECORDED");
+      return () => { current = false; };
+    }
+    const fetchAttendance = async () => {
+      try {
+        const response = await API.get(`/groups/${groupId}/meetings/${activeMeeting.id}/record`, { params: { cycleId: Number(activeCycleId) } });
+        const rows = response.data?.record?.attendance || [];
+        const member = rows.find((row) => String(row.memberId) === String(selectedMemberId));
+        if (current) setSelectedMemberAttendance(String(member?.status || "NOT_RECORDED").toUpperCase());
+      } catch {
+        if (current) setSelectedMemberAttendance("NOT_RECORDED");
+      }
+    };
+    void fetchAttendance();
+    return () => { current = false; };
+  }, [groupId, activeMeeting?.id, activeCycleId, selectedMemberId]);
 
   const handleOpenMeeting = async (event) => {
     event.preventDefault();
@@ -141,11 +177,22 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
     }
 
     const transactions = [];
-    if (Number(sharesCount) > 0) transactions.push({ type: "SHARE_PURCHASE", amount: Number(sharesCount) * shareValue, sharesCount: Number(sharesCount) });
-    if (Number(socialFundAmount) > 0) transactions.push({ type: "SOCIAL_FUND", amount: Number(socialFundAmount), sharesCount: 0 });
-    if (Number(fineAmount) > 0) transactions.push({ type: "FINE_PAYMENT", amount: Number(fineAmount), sharesCount: 0, fineReason: fineReason || "General fine" });
-    if (transactions.length === 0) {
-      setMessage({ type: "error", text: "Please enter at least one transaction field." });
+    if (String(sharesCount).trim() !== "" && Number(sharesCount) > 0) transactions.push({ type: "SHARE_PURCHASE", amount: Number(sharesCount) * shareValue, sharesCount: Number(sharesCount) });
+    if (String(socialFundAmount).trim() !== "" && Number(socialFundAmount) > 0) transactions.push({ type: "SOCIAL_FUND", amount: Number(socialFundAmount), sharesCount: 0 });
+    let fineAssessment = null;
+    if (fineRuleSelection) {
+      fineAssessment = { ruleLabel: fineRuleSelection };
+      if (fineRuleSelection === "OTHER") {
+        fineAssessment.otherReason = otherFineReason;
+        fineAssessment.otherAmount = Number(otherFineAmount);
+      }
+    }
+    if (transactions.length === 0 && !fineAssessment) {
+      setMessage({ type: "error", text: "Enter a contribution or select a fine rule to assess." });
+      return;
+    }
+    if (fineRuleSelection === "OTHER" && (String(otherFineReason).trim().length < 3 || !Number.isFinite(Number(otherFineAmount)) || Number(otherFineAmount) <= 0)) {
+      setMessage({ type: "error", text: "For Other fine, enter a reason of at least 3 characters and a positive fine amount." });
       return;
     }
 
@@ -154,16 +201,18 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
     setMessage({ type: "", text: "" });
     try {
       const response = await API.post(`/meetings/${meetingId}/transactions`, {
-        groupId, cycleId: Number(activeCycleId), memberId: Number(selectedMemberId), transactions,
+        groupId, cycleId: Number(activeCycleId), memberId: Number(selectedMemberId), transactions, fineAssessment,
       });
       if (!response.data.success) throw new Error(response.data.message || "Failed to record transactions.");
       const member = members.find((entry) => String(entry.id) === recordedMemberId);
       const receiptNumbers = (response.data.transactions || []).map((item) => item.receipt?.receiptNumber).filter(Boolean);
-      setMessage({ type: "success", text: `Transactions recorded for ${member?.full_name || "the selected member"}. ${receiptNumbers.length ? `Receipt(s): ${receiptNumbers.join(", ")}. ` : ""}Open Meeting Records & Receipts to view or print receipts. The meeting remains open; you can record the next member now.` });
+      const assessedFine = response.data.fineAssessment;
+      setMessage({ type: "success", text: `${transactions.length ? `Transactions recorded for ${member?.full_name || "the selected member"}. ` : ""}${receiptNumbers.length ? `Receipt(s): ${receiptNumbers.join(", ")}. ` : ""}${assessedFine ? `Fine assessed: ${assessedFine.fineLabel}${assessedFine.reason !== assessedFine.fineLabel ? ` (${assessedFine.reason})` : ""}, ${Number(assessedFine.amount).toLocaleString()} RWF added to outstanding fines; no cash is recorded until it is paid. ` : ""}The meeting remains open.` });
       setSharesCount(0);
-      setSocialFundAmount(0);
-      setFineAmount(0);
-      setFineReason("");
+      setSocialFundAmount("");
+      setFineRuleSelection("");
+      setOtherFineReason("");
+      setOtherFineAmount("");
       if (members.length) {
         const index = members.findIndex((entry) => String(entry.id) === recordedMemberId);
         setSelectedMemberId(String(members[(index + 1 + members.length) % members.length].id));
@@ -220,10 +269,13 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
           <form onSubmit={handleRecordTransactions} className="space-y-4 max-w-2xl">
             <div><label className="block text-sm font-medium text-gray-700">Select Member</label><select required value={selectedMemberId} onChange={(event) => setSelectedMemberId(event.target.value)} className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">{members.map((member) => <option key={member.id} value={member.id}>{member.full_name} ({member.phone_number}) - {member.role}</option>)}</select></div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div><label className="block text-sm font-medium text-gray-700">Shares Purchased (Value: {shareValue.toLocaleString()} RWF / share)</label><input type="number" min="0" step="1" value={sharesCount} onChange={(event) => setSharesCount(event.target.value)} className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" /><span className="text-xs text-gray-500">Total: {(Number(sharesCount) * shareValue).toLocaleString()} RWF</span></div>
-              <div><label className="block text-sm font-medium text-gray-700">Social Fund Contribution (RWF)</label><input type="number" min="0" step="0.01" value={socialFundAmount} onChange={(event) => setSocialFundAmount(event.target.value)} className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
-              <div><label className="block text-sm font-medium text-gray-700">Fine Payment (RWF)</label><input type="number" min="0" step="0.01" value={fineAmount} onChange={(event) => setFineAmount(event.target.value)} className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
-              <div><label className="block text-sm font-medium text-gray-700">Fine Reason (Optional)</label><input type="text" value={fineReason} onChange={(event) => setFineReason(event.target.value)} placeholder="e.g. Late arrival" className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" /></div>
+              <div><label className="block text-sm font-medium text-gray-700">Shares Purchased (Value: {shareValue.toLocaleString()} RWF / share)</label><input type="number" min="0" step="1" value={sharesCount} onChange={(event) => setSharesCount(event.target.value)} className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" /><span className="text-xs text-gray-500">Constitution minimum: {groupRules.minSharesPerMeeting}. Total: {(Number(sharesCount) * shareValue).toLocaleString()} RWF</span></div>
+              <div><label className="block text-sm font-medium text-gray-700">Social Fund Contribution (RWF)</label><input type="number" min="0" step="0.01" value={socialFundAmount} onChange={(event) => setSocialFundAmount(event.target.value)} placeholder={groupRules.socialFundMode === "FIXED" ? `${groupRules.socialFundContributionAmount} if present and unpaid` : "Contribution amount"} className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" />{groupRules.socialFundMode === "FIXED" && <span className="text-xs text-gray-600">Fixed rule: total must equal exactly {groupRules.socialFundContributionAmount.toLocaleString()} RWF for a present member. If already paid earlier in this meeting, leave this blank; the server checks the total. Attendance: {selectedMemberAttendance.replaceAll("_", " ")}. Record attendance in Meeting Records first. Members marked absent or excused are exempt.</span>}</div>
+              <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-3">
+                <div><label className="block text-sm font-medium text-amber-950">Assess a Fine (optional)</label><select value={fineRuleSelection} onChange={(event) => setFineRuleSelection(event.target.value)} className="w-full px-3 py-2 mt-1 border border-amber-300 rounded-lg bg-white"><option value="">No fine</option>{groupRules.fineRules.map((rule) => <option key={rule.label || rule.name} value={rule.label || rule.name}>{rule.label || rule.name} — {Number(rule.amount).toLocaleString()} RWF</option>)}{groupRules.allowOtherFines && <option value="OTHER">Other — enter reason and amount</option>}</select></div>
+                {fineRuleSelection && fineRuleSelection !== "OTHER" && (() => { const rule = groupRules.fineRules.find((item) => String(item.label || item.name) === fineRuleSelection); return <p className="text-sm text-amber-900">The approved amount is <strong>{Number(rule?.amount || 0).toLocaleString()} RWF</strong>. It will be added to this member's outstanding fines. No cash is recorded until the fine is paid.</p>; })()}
+                {fineRuleSelection === "OTHER" && <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><div><label className="block text-sm font-medium text-gray-700">Reason for other fine</label><input required minLength="3" maxLength="255" value={otherFineReason} onChange={(event) => setOtherFineReason(event.target.value)} placeholder="Explain the reason" className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg" /></div><div><label className="block text-sm font-medium text-gray-700">Fine amount (RWF)</label><input required type="number" min="0.01" step="0.01" value={otherFineAmount} onChange={(event) => setOtherFineAmount(event.target.value)} placeholder="Amount defined for this case" className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg" /></div><p className="sm:col-span-2 text-xs text-amber-900">Other fines are allowed by the current constitution. This creates an outstanding fine, not a cash receipt.</p></div>}
+              </div>
             </div>
             <button type="submit" disabled={loading || members.length === 0} className="px-6 py-2 font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50">{loading ? "Recording..." : "Record Member Transactions"}</button>
             <p className="text-xs text-slate-500">After a successful save, the form clears and selects the next member. The meeting remains open so you can continue recording without refreshing the page.</p>
@@ -231,7 +283,7 @@ export default function MeetingOperations({ user, activeCycleId = null, onTransa
 
           <div className="border-t pt-4 space-y-2">
             <h3 className="font-semibold text-slate-800">Close this meeting</h3>
-            <p className="text-sm text-slate-600">Before closing, visit Cashbook &amp; Reconciliation, keep this meeting selected, and record a physical count for both the Loan Fund and Social Fund. Both counts must match the latest cashbook balances, with no new entries after the counts.</p>
+            <p className="text-sm text-slate-600">Before closing, record attendance for every active member. If the constitution requires a fixed Social Fund contribution, each present member must have paid the exact amount; absent or excused members are exempt. Then visit Cashbook &amp; Reconciliation, keep this meeting selected, and record a physical count for both the Loan Fund and Social Fund. Both counts must match the latest cashbook balances, with no new entries after the counts.</p>
             <div className="flex flex-wrap gap-2">{onOpenCashbook && <button type="button" onClick={onOpenCashbook} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50">Open Cashbook &amp; Reconciliation</button>}<button type="button" onClick={handleCloseMeeting} disabled={loading} className="px-4 py-2 rounded-lg font-semibold text-white bg-slate-800 hover:bg-slate-900 disabled:opacity-50">{loading ? "Please wait..." : `Close Meeting #${activeMeeting.meetingNumber}`}</button></div>
           </div>
         </div>

@@ -18,3 +18,31 @@ schema1.sql
 # OS files
 .DS_Store
 Thumbs.db
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencies and generated outputs
+**/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Local database backups and private key material
+backups/
+*.sql.gz
+*.sql.gz.enc
+*.sha256
+
+# Editors and OS files
+.DS_Store
+.vscode/
+.idea/

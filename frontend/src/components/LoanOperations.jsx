@@ -14,6 +14,7 @@ export default function LoanOperations({
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [repaymentMemberId, setRepaymentMemberId] = useState("");
   const [memberLoans, setMemberLoans] = useState([]);
+  const [memberFines, setMemberFines] = useState([]);
   const [loadingMemberLoans, setLoadingMemberLoans] = useState(false);
   const [repaymentLoansRefresh, setRepaymentLoansRefresh] = useState(0);
   const [openMeetings, setOpenMeetings] = useState([]);
@@ -121,36 +122,44 @@ export default function LoanOperations({
 
   useEffect(() => {
     let isCurrentRequest = true;
-    const resetTimeoutId = window.setTimeout(() => {
-      if (isCurrentRequest) {
-        setMemberLoans([]);
-        setSelectedLoanId("");
-      }
-    }, 0);
+
+    const clearOutstandingLoanState = () => {
+      setMemberLoans([]);
+      setMemberFines([]);
+      setSelectedLoanId("");
+    };
 
     if (
       !Number.isSafeInteger(groupId) || groupId <= 0 ||
       !Number.isSafeInteger(Number(activeCycleId)) || Number(activeCycleId) <= 0 ||
       !Number.isSafeInteger(Number(repaymentMemberId)) || Number(repaymentMemberId) <= 0
     ) {
-      return () => {
-        isCurrentRequest = false;
-        window.clearTimeout(resetTimeoutId);
-      };
+      queueMicrotask(() => {
+        if (isCurrentRequest) {
+          clearOutstandingLoanState();
+          setLoadingMemberLoans(false);
+        }
+      });
+      return () => { isCurrentRequest = false; };
     }
 
     const fetchOutstandingLoans = async () => {
       setLoadingMemberLoans(true);
+      clearOutstandingLoanState();
+
       try {
         const response = await API.get(`/groups/${groupId}/loans/outstanding`, {
           params: { cycleId: Number(activeCycleId), memberId: Number(repaymentMemberId) },
         });
         if (isCurrentRequest) {
           setMemberLoans(response.data?.success ? response.data.loans || [] : []);
+          setMemberFines(response.data?.success ? response.data.fines || [] : []);
         }
       } catch (err) {
         if (isCurrentRequest) {
           setMemberLoans([]);
+          setMemberFines([]);
+          setSelectedLoanId("");
           setMessage({
             type: "error",
             text: err.response?.data?.message || "Could not load this borrower's outstanding loans.",
@@ -162,10 +171,7 @@ export default function LoanOperations({
     };
 
     void fetchOutstandingLoans();
-    return () => {
-      isCurrentRequest = false;
-      window.clearTimeout(resetTimeoutId);
-    };
+    return () => { isCurrentRequest = false; };
   }, [groupId, activeCycleId, repaymentMemberId, repaymentLoansRefresh]);
 
   useEffect(() => {
@@ -197,7 +203,8 @@ export default function LoanOperations({
     };
   }, [groupId]);
 
-  const selectedRepaymentLoan = memberLoans.find((loan) => String(loan.loanId) === String(selectedLoanId));
+  const selectedRepaymentLoan = memberLoans.find((loan) => `LOAN:${loan.loanId}` === String(selectedLoanId));
+  const selectedRepaymentFine = memberFines.find((fine) => `FINE:${fine.fineId}` === String(selectedLoanId));
 
   const handleIssueLoan = async (e) => {
     e.preventDefault();
@@ -267,13 +274,8 @@ export default function LoanOperations({
       setMessage({ type: "error", text: "Select the borrower first." });
       return;
     }
-    if (
-      !selectedLoanId ||
-      !Number.isSafeInteger(Number(selectedLoanId)) ||
-      Number(selectedLoanId) <= 0 ||
-      !selectedRepaymentLoan
-    ) {
-      setMessage({ type: "error", text: "Select one of this borrower's outstanding loans." });
+    if (!selectedRepaymentLoan && !selectedRepaymentFine) {
+      setMessage({ type: "error", text: "Select one of this borrower's outstanding loans or fines." });
       return;
     }
     if (
@@ -285,24 +287,39 @@ export default function LoanOperations({
     }
     setLoading(true);
     try {
-      const res = await API.post(`/loans/${Number(selectedLoanId)}/repay`, {
-        groupId,
-        cycleId: Number(activeCycleId),
-        meetingId: Number(selectedMeetingId),
-        memberId: Number(repaymentMemberId),
-        repaymentAmount: Number(repaymentAmount),
-      });
-      if (res.data.success) {
-        const repayment = res.data.repayment;
-        setMessage({
-          type: "success",
-          text: `Repayment recorded: ${Number(repayment.principalPaid).toLocaleString()} RWF principal and ${Number(repayment.interestPaid).toLocaleString()} RWF interest. Remaining balance: ${Number(repayment.balanceRemaining).toLocaleString()} RWF. ${repayment.receipt?.receiptNumber ? `Receipt: ${repayment.receipt.receiptNumber}. Open Meeting Records & Receipts to print it.` : ""}`,
+      if (selectedRepaymentFine) {
+        const fineId = Number(selectedRepaymentFine.fineId);
+        const res = await API.post(`/groups/${groupId}/fines/${fineId}/payments`, {
+          cycleId: Number(activeCycleId),
+          meetingId: Number(selectedMeetingId),
+          memberId: Number(repaymentMemberId),
+          amount: Number(repaymentAmount),
         });
-        setRepaymentAmount("");
-        setSelectedLoanId("");
-        setRepaymentLoansRefresh((current) => current + 1);
-        if (onLoanProcessed) onLoanProcessed();
+        if (res.data.success) {
+          const payment = res.data.payment;
+          setMessage({ type: "success", text: `Fine payment recorded: ${Number(payment.paymentAmount).toLocaleString()} RWF. Outstanding fines for this assessment: ${Number(payment.balanceRemaining).toLocaleString()} RWF. ${payment.receipt?.receiptNumber ? `Receipt: ${payment.receipt.receiptNumber}. Open Meeting Records & Receipts to print it.` : ""}` });
+        }
+      } else {
+        const loanId = Number(selectedRepaymentLoan.loanId);
+        const res = await API.post(`/loans/${loanId}/repay`, {
+          groupId,
+          cycleId: Number(activeCycleId),
+          meetingId: Number(selectedMeetingId),
+          memberId: Number(repaymentMemberId),
+          repaymentAmount: Number(repaymentAmount),
+        });
+        if (res.data.success) {
+          const repayment = res.data.repayment;
+          setMessage({
+            type: "success",
+            text: `Repayment recorded: ${Number(repayment.principalPaid).toLocaleString()} RWF principal and ${Number(repayment.interestPaid).toLocaleString()} RWF interest. Remaining balance: ${Number(repayment.balanceRemaining).toLocaleString()} RWF. ${repayment.receipt?.receiptNumber ? `Receipt: ${repayment.receipt.receiptNumber}. Open Meeting Records & Receipts to print it.` : ""}`,
+          });
+        }
       }
+      setRepaymentAmount("");
+      setSelectedLoanId("");
+      setRepaymentLoansRefresh((current) => current + 1);
+      if (onLoanProcessed) onLoanProcessed();
     } catch (err) {
       setMessage({
         type: "error",
@@ -515,7 +532,7 @@ export default function LoanOperations({
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700">
-              Outstanding Loan
+              Outstanding Loan or Fine
             </label>
             <select
               required
@@ -524,23 +541,28 @@ export default function LoanOperations({
                 setSelectedLoanId(e.target.value);
                 setRepaymentAmount("");
               }}
-              disabled={!repaymentMemberId || loadingMemberLoans || memberLoans.length === 0}
+              disabled={!repaymentMemberId || loadingMemberLoans || (memberLoans.length === 0 && memberFines.length === 0)}
               className="w-full px-3 py-2 mt-1 border border-gray-300 rounded-lg bg-white disabled:bg-gray-100"
             >
               <option value="">
                 {loadingMemberLoans
-                  ? "Loading this borrower's loans..."
+                  ? "Loading this borrower's loans and fines..."
                   : !repaymentMemberId
                     ? "Select a borrower first"
-                    : memberLoans.length === 0
-                      ? "No outstanding loans in the active cycle"
-                      : "Select the loan to repay"}
+                    : memberLoans.length === 0 && memberFines.length === 0
+                      ? "No outstanding loans or fines in the active cycle"
+                      : "Select the loan or fine to pay"}
               </option>
-              {memberLoans.map((loan) => (
-                <option key={loan.loanId} value={loan.loanId}>
+              {memberLoans.length > 0 && <optgroup label="Loans">{memberLoans.map((loan) => (
+                <option key={loan.loanId} value={`LOAN:${loan.loanId}`}>
                   {`Loan #${loan.loanId} — Principal ${Number(loan.principalAmount).toLocaleString()} RWF — Remaining ${Number(loan.balanceRemaining).toLocaleString()} RWF — Due ${String(loan.dueDate).slice(0, 10)}`}
                 </option>
-              ))}
+              ))}</optgroup>}
+              {memberFines.length > 0 && <optgroup label="Outstanding fines">{memberFines.map((fine) => (
+                <option key={fine.fineId} value={`FINE:${fine.fineId}`}>
+                  {`Fine #${fine.fineId} — ${fine.reason || fine.fineLabel} — Remaining ${Number(fine.balanceRemaining).toLocaleString()} RWF`}
+                </option>
+              ))}</optgroup>}
             </select>
           </div>
           {selectedRepaymentLoan && (
@@ -552,6 +574,15 @@ export default function LoanOperations({
               <p>Due date: {String(selectedRepaymentLoan.dueDate).slice(0, 10)}</p>
             </div>
           )}
+          {selectedRepaymentFine && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950 space-y-1">
+              <p className="font-semibold">Outstanding fine #{selectedRepaymentFine.fineId}: {selectedRepaymentFine.reason || selectedRepaymentFine.fineLabel}</p>
+              <p>Fine assessed: {Number(selectedRepaymentFine.assessedAmount).toLocaleString()} RWF</p>
+              <p>Previously paid: {Number(selectedRepaymentFine.amountPaid).toLocaleString()} RWF</p>
+              <p className="font-semibold">Fine balance remaining: {Number(selectedRepaymentFine.balanceRemaining).toLocaleString()} RWF</p>
+              <p className="text-xs">A fine assessment creates a debt. Cashbook income is recorded only when you collect a payment here.</p>
+            </div>
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700">
               Repayment Amount (RWF)
@@ -560,6 +591,7 @@ export default function LoanOperations({
               type="number"
               required
               min="0.01"
+              max={selectedRepaymentFine ? selectedRepaymentFine.balanceRemaining : selectedRepaymentLoan ? selectedRepaymentLoan.balanceRemaining : undefined}
               step="0.01"
               value={repaymentAmount}
               onChange={(e) => setRepaymentAmount(e.target.value)}
@@ -568,11 +600,11 @@ export default function LoanOperations({
             />
           </div>
           <p className="text-xs text-gray-500">
-            The list shows this borrower's unpaid loans in the active cycle. Select the exact loan before entering the payment. Repayments are applied to outstanding interest first, then principal; payments above the selected loan's remaining balance are rejected.
+            Select one of this borrower's outstanding loans or fines. Loan repayments are applied to interest first, then principal. Fine payments reduce only the selected fine balance. Payments above the selected balance are rejected.
           </p>
           <button
             type="submit"
-            disabled={loading || loadingMeetings || loadingMemberLoans || !selectedMeetingId || !repaymentMemberId || !selectedLoanId || !selectedRepaymentLoan}
+            disabled={loading || loadingMeetings || loadingMemberLoans || !selectedMeetingId || !repaymentMemberId || !selectedLoanId || (!selectedRepaymentLoan && !selectedRepaymentFine)}
             className="w-full py-2 font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50"
           >
             {loading ? "Processing..." : "Submit Repayment"}

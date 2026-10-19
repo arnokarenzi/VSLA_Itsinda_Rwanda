@@ -114,9 +114,10 @@ async function requirePreviouslyBalancedCount(connection, groupId, cycleId, fund
 
 async function getLastReconciliation(connection, groupId, cycleId, fundType) {
   const [rows] = await connection.query(
-    `SELECT r.*, u.full_name AS reconciled_by_name
+    `SELECT r.*, u.full_name AS reconciled_by_name, witness.full_name AS witness_member_name
      FROM cash_reconciliations r
      LEFT JOIN users u ON u.id = r.reconciled_by
+     LEFT JOIN users witness ON witness.id = r.witness_member_id
      WHERE r.group_id = ? AND r.cycle_id = ? AND r.fund_type = ?
      ORDER BY r.id DESC LIMIT 1`,
     [groupId, cycleId, fundType],
@@ -132,6 +133,8 @@ async function getLastReconciliation(connection, groupId, cycleId, fundType) {
     ledgerEntryIdAtCount: row.ledger_entry_id_at_count == null ? null : Number(row.ledger_entry_id_at_count),
     notes: row.notes || "",
     reconciledBy: row.reconciled_by_name || "Unknown user",
+    witnessMemberId: row.witness_member_id == null ? null : Number(row.witness_member_id),
+    witnessMemberName: row.witness_member_name || null,
     createdAt: row.created_at,
   };
 }
@@ -215,6 +218,15 @@ async function getCashbookReport(groupId, cycleId, { connection: suppliedConnect
       [groupId, cycleId],
     );
 
+    const [fineRows] = await connection.query(
+      `SELECT COUNT(*) AS outstanding_fine_count,
+          COALESCE(SUM(amount - amount_paid), 0) AS outstanding_fine_balance
+       FROM fine_assessments
+       WHERE group_id = ? AND cycle_id = ? AND status IN ('OUTSTANDING','PARTIALLY_PAID')
+         AND amount - amount_paid > 0.009`,
+      [groupId, cycleId],
+    );
+
     const [recentRows] = await connection.query(
       `SELECT e.id, e.fund_type, e.entry_type, e.direction, e.amount, e.profit_effect,
           e.notes, e.meeting_id, e.member_id, e.loan_id, e.created_at, e.reversal_of_entry_id,
@@ -237,6 +249,10 @@ async function getCashbookReport(groupId, cycleId, { connection: suppliedConnect
       outstandingLoans: {
         count: Number(loanRows[0]?.outstanding_loan_count || 0),
         balance: roundMoney(loanRows[0]?.outstanding_loan_balance || 0),
+      },
+      outstandingFines: {
+        count: Number(fineRows[0]?.outstanding_fine_count || 0),
+        balance: roundMoney(fineRows[0]?.outstanding_fine_balance || 0),
       },
       recentEntries: recentRows.map((row) => ({
         id: Number(row.id),

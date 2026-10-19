@@ -8,6 +8,8 @@ export default function CashbookOperations({ user, activeCycleId }) {
   const groupId = Number(user?.groupId ?? user?.group_id);
   const [report, setReport] = useState(null);
   const [openMeetings, setOpenMeetings] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [witnessMemberId, setWitnessMemberId] = useState("");
   const [meetingId, setMeetingId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -63,7 +65,17 @@ export default function CashbookOperations({ user, activeCycleId }) {
   useEffect(() => {
     void loadReport();
     void loadMeetings();
-  }, [loadReport, loadMeetings]);
+    let isMounted = true;
+    API.get(`/groups/${groupId}/members`).then((response) => {
+      if (!isMounted || !response.data.success) return;
+      const activeMembers = (response.data.members || []).filter((member) => Number(member.is_active) !== 0);
+      setMembers(activeMembers);
+      setWitnessMemberId((current) => activeMembers.some((member) => String(member.id) === String(current)) ? current : activeMembers.length ? String(activeMembers[0].id) : "");
+    }).catch(() => {
+      if (isMounted) setMembers([]);
+    });
+    return () => { isMounted = false; };
+  }, [loadReport, loadMeetings, groupId]);
 
   const sendAction = async (path, body, successMessage, reset) => {
     setNotice({ type: "", text: "" });
@@ -119,10 +131,15 @@ export default function CashbookOperations({ user, activeCycleId }) {
 
   const submitReconciliation = (event) => {
     event.preventDefault();
+    if (!witnessMemberId) {
+      setNotice({ type: "error", text: "Select a group member as the witness before saving the cash count." });
+      return;
+    }
     void sendAction("reconcile", {
       fundType: reconcileFund,
       countedCash: Number(countedCash),
       notes: reconcileNotes,
+      witnessMemberId: Number(witnessMemberId),
       ...(meetingId ? { meetingId: Number(meetingId) } : {}),
     }, "Cash count recorded.", () => { setCountedCash(""); setReconcileNotes(""); });
   };
@@ -174,6 +191,7 @@ export default function CashbookOperations({ user, activeCycleId }) {
           <div className="mt-3 pt-3 border-t text-sm space-y-1">
             <div className="flex justify-between gap-2"><span className="text-slate-500">Latest physical count</span><span className="font-semibold">{MONEY(reconciliation.countedCash)}</span></div>
             <div className="flex justify-between gap-2"><span className="text-slate-500">Variance at count</span><span className={`font-semibold ${Math.abs(reconciliation.variance) < 0.01 ? "text-emerald-700" : "text-red-700"}`}>{MONEY(reconciliation.variance)}</span></div>
+            <div className="flex justify-between gap-2"><span className="text-slate-500">Witness</span><span className="text-right font-medium">{reconciliation.witnessMemberName || "Not recorded (historical count)"}</span></div>
             {!fund.reconciliationCurrent && <p className="text-xs text-amber-700">Ledger entries were added after this cash count. Reconcile again.</p>}
           </div>
         ) : <p className="text-xs text-amber-700">No physical cash count has been recorded yet.</p>}
@@ -240,7 +258,7 @@ export default function CashbookOperations({ user, activeCycleId }) {
 
         <form onSubmit={submitAdjustment} className="rounded-xl border p-4 space-y-3">
           <h3 className="font-bold text-slate-900">Document Cash Adjustment</h3>
-          <p className="text-xs text-slate-500">Only after investigating a discrepancy. The system never auto-adjusts cash to make the count match.</p>
+          <p className="text-xs text-slate-600">Use this to record a newly discovered, authorized cash difference or opening/carried-forward cash after investigating it. It creates a new IN/OUT entry; it does not undo an existing transaction. Never use it just to hide a wrongly recorded entry.</p>
           <select value={adjustmentFund} onChange={(e) => setAdjustmentFund(e.target.value)} className="w-full rounded-lg border px-3 py-2"><option value="LOAN_FUND">Loan Fund</option><option value="SOCIAL_FUND">Social Fund</option></select>
           <div className="grid grid-cols-2 gap-2"><select value={adjustmentDirection} onChange={(e) => setAdjustmentDirection(e.target.value)} className="rounded-lg border px-3 py-2"><option value="IN">Cash increase</option><option value="OUT">Cash decrease</option></select><input type="number" required min="0.01" step="0.01" value={adjustmentAmount} onChange={(e) => setAdjustmentAmount(e.target.value)} placeholder="Amount (RWF)" className="rounded-lg border px-3 py-2" /></div>
           <select value={adjustmentTreatment} onChange={(e) => setAdjustmentTreatment(e.target.value)} className="w-full rounded-lg border px-3 py-2">
@@ -256,7 +274,8 @@ export default function CashbookOperations({ user, activeCycleId }) {
           <p className="text-xs text-slate-500">Select the open meeting above, then count the actual cash separately for each fund. Both funds must match the cashbook and have no new entries after the count before that meeting can be closed.</p>
           <select value={reconcileFund} onChange={(e) => setReconcileFund(e.target.value)} className="w-full rounded-lg border px-3 py-2"><option value="LOAN_FUND">Loan Fund</option><option value="SOCIAL_FUND">Social Fund</option></select>
           <input type="number" required min="0" step="0.01" value={countedCash} onChange={(e) => setCountedCash(e.target.value)} placeholder="Physical cash counted (RWF)" className="w-full rounded-lg border px-3 py-2" />
-          <input maxLength={500} value={reconcileNotes} onChange={(e) => setReconcileNotes(e.target.value)} placeholder="Counted by / witness / notes" className="w-full rounded-lg border px-3 py-2" />
+          <div><label className="block text-sm font-medium text-slate-700">Witness (group member, required)</label><select required value={witnessMemberId} onChange={(e) => setWitnessMemberId(e.target.value)} className="w-full rounded-lg border bg-white px-3 py-2"><option value="">Select a member to witness the cash count</option>{members.map((member) => <option key={member.id} value={member.id}>{member.full_name} ({member.phone_number})</option>)}</select></div>
+          <input maxLength={500} value={reconcileNotes} onChange={(e) => setReconcileNotes(e.target.value)} placeholder="Optional notes about the count" className="w-full rounded-lg border px-3 py-2" />
           <button className="w-full rounded-lg py-2 font-semibold text-white bg-indigo-600 hover:bg-indigo-700">Save Cash Count</button>
         </form>
       </div>
@@ -264,7 +283,7 @@ export default function CashbookOperations({ user, activeCycleId }) {
       <form onSubmit={submitReversal} className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
         <div>
           <h3 className="font-bold text-amber-950">Correct a Financial Entry (Reversal)</h3>
-          <p className="mt-1 text-xs text-amber-900">Never delete or overwrite a posted transaction. Choose an eligible entry and explain the reason; the system appends an opposite entry and logs who made the correction. Then record the correct replacement through the normal form and count the cash again. Loan disbursements and loan repayments require a loan-specific review and are not reversed here.</p>
+          <p className="mt-1 text-xs text-amber-900">Use this when a specific posted entry is wrong. The system appends an equal-and-opposite reversal linked to that entry, preserving the audit trail; then record the correct replacement through the normal form and count the cash again. Unlike a cash adjustment, a reversal explicitly cancels the effect of an identifiable existing entry. Loan disbursements and loan repayments require a loan-specific review and are not reversed here.</p>
         </div>
         <select required value={reverseEntryId} onChange={(e) => setReverseEntryId(e.target.value)} disabled={!meetingId || !(report?.recentEntries || []).some((entry) => entry.correctionEligible)} className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2">
           <option value="">Choose entry to reverse</option>
